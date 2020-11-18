@@ -84,6 +84,7 @@ class ModelParser(AbstractModelParser):
             "The input model was setup with image data format '{}', but your "
             "keras config file expects '{}'.".format(layer.data_format,
                                                      k.image_data_format()))
+        return attributes
 
     def parse_sparse_depthwiseconvolution(self, layer, attributes):
         return self.parse_depthwiseconvolution(layer, attributes)

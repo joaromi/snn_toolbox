@@ -79,6 +79,295 @@ class AbstractModelParser:
         self._layer_dict = {}
         self.parsed_model = None
 
+    def parse_subnet(self, layers, idx, prev_out_idx=None, in_layers=None, out_layers=None, repair=None, special_relu=[]):
+        name_map = {}
+        inserted_flatten = False
+        out_links = [None]*len(out_layers)
+        is_output = False
+        need_rewire = False
+        include_activation = False
+
+        if prev_out_idx is not None and in_layers is not None:
+            if len(prev_out_idx) != len(in_layers):
+                raise ValueError("prev_out_idx and in_layers must be the same size.")
+        
+        relu_pred = eval(self.config.get('custom', 'relu_pred'))
+        if relu_pred:
+            act_pred = 'relu'
+        else:
+            act_pred = 'linear'
+
+        snn_layers = eval(self.config.get('restrictions', 'snn_layers'))
+        for k_,layer in enumerate(layers):
+            layer_type = self.get_type(layer)
+
+            is_output = layer in out_layers
+
+            if repair is not None:
+                need_rewire = layer in repair
+
+            # Absorb BatchNormalization layer into parameters of previous layer
+            if layer_type == 'BatchNormalization':
+                parameters_bn = list(self.get_batchnorm_parameters(layer))
+                parameters_bn, axis = parameters_bn[:-1], parameters_bn[-1]
+                inbound = self.get_inbound_layers_with_parameters(layer)
+                assert len(inbound) == 1, \
+                    "Could not find unique layer with parameters " \
+                    "preceeding BatchNorm layer."
+                prev_layer = inbound[0]
+                prev_layer_idx = name_map[str(id(prev_layer))]
+                parameters = list(
+                    self._layer_list[prev_layer_idx]['parameters'])
+                prev_layer_type = self.get_type(prev_layer)
+                print("Absorbing batch-normalization parameters into " +
+                      "parameters of previous {}.".format(prev_layer_type))
+
+                _depthwise_conv_names = ['DepthwiseConv2D',
+                                         'SparseDepthwiseConv2D']
+                _sparse_names = ['Sparse', 'SparseConv2D',
+                                 'SparseDepthwiseConv2D']
+                is_depthwise = prev_layer_type in _depthwise_conv_names
+                is_sparse = prev_layer_type in _sparse_names
+
+                if is_sparse:
+                    args = [parameters[0], parameters[2]] + parameters_bn
+                else:
+                    args = parameters[:2] + parameters_bn
+
+                kwargs = {
+                    'axis': axis,
+                    'image_data_format': keras.backend.image_data_format(),
+                    'is_depthwise': is_depthwise}
+
+                params_to_absorb = absorb_bn_parameters(*args, **kwargs)
+
+                if is_sparse:
+                    # Need to also save the mask associated with sparse layer.
+                    params_to_absorb += (parameters[1],)
+
+                self._layer_list[prev_layer_idx]['parameters'] = \
+                    params_to_absorb
+
+            if layer_type == 'GlobalAveragePooling2D':
+                print("Replacing GlobalAveragePooling by AveragePooling "
+                      "plus Flatten.")
+                _layer_type = 'AveragePooling2D'
+                axis = 2 if IS_CHANNELS_FIRST else 1
+                self._layer_list.append(
+                    {'layer_type': _layer_type,
+                     'name': self.get_name(layer, idx, _layer_type),
+                     'pool_size': (layer.input_shape[axis: axis + 2]),
+                     'inbound': self.get_inbound_names(layer, name_map),
+                     'strides': [1, 1]})
+                name_map[_layer_type + str(idx)] = idx
+                idx += 1
+                _layer_type = 'Flatten'
+                num_str = self.format_layer_idx(idx)
+                shape_str = str(np.prod(layer.output_shape[1:]))
+                self._layer_list.append(
+                    {'name': num_str + _layer_type + '_' + shape_str,
+                     'layer_type': _layer_type,
+                     'inbound': [self._layer_list[-1]['name']]})
+                name_map[_layer_type + str(idx)] = idx
+                idx += 1
+                inserted_flatten = True
+
+            if layer_type == 'Add':
+                print("Replacing Add layer by Concatenate plus Conv.")
+                shape = layer.output_shape
+                if IS_CHANNELS_FIRST:
+                    axis = 1
+                    c, h, w = shape[1:]
+                    shape_str = '{}x{}x{}'.format(2 * c, h, w)
+                else:
+                    axis = -1
+                    h, w, c = shape[1:]
+                    shape_str = '{}x{}x{}'.format(h, w, 2 * c)
+                _layer_type = 'Concatenate'
+                num_str = self.format_layer_idx(idx)
+                self._layer_list.append({
+                    'layer_type': _layer_type,
+                    'name': num_str + _layer_type + '_' + shape_str,
+                    'inbound': self.get_inbound_names(layer, name_map),
+                    'axis': axis})
+                name_map[_layer_type + str(idx)] = idx
+                idx += 1
+                _layer_type = 'Conv2D'
+                num_str = self.format_layer_idx(idx)
+                shape_str = '{}x{}x{}'.format(*shape[1:])
+                weights = np.zeros([1, 1, 2 * c, c])
+                for k in range(c):
+                    weights[:, :, k::c, k] = 1
+                self._layer_list.append({
+                    'name': num_str + _layer_type + '_' + shape_str,
+                    'layer_type': _layer_type,
+                    'inbound': [self._layer_list[-1]['name']],
+                    'filters': c,
+                    'activation': act_pred,
+                    'parameters': (weights, np.zeros(c)),
+                    'kernel_size': 1})
+                name_map[str(id(layer))] = idx
+
+                if is_output:
+                    # get output layers references
+                    for i,out_layer in enumerate(out_layers):
+                        if layer==out_layer:
+                            out_links[i]=idx
+
+                idx += 1
+
+            if layer_type=='Activation':
+                activation_str = self.get_activation(layer)
+                if activation_str == 'softmax' and \
+                        self.config.getboolean('conversion', 'softmax_to_relu'):
+                    activation = 'relu'
+                    print("Replaced softmax by relu activation function.")
+                elif activation_str == 'linear' and self.get_type(layer) == 'Dense' \
+                        and self.config.getboolean('conversion', 'append_softmax',
+                                                fallback=False):
+                    activation = 'softmax'
+                    print("Added softmax.")
+                else:
+                    activation = activation_str
+                    print("Using activation {}.".format(activation_str))
+                include_activation=True
+
+            if layer_type=='ReLU':
+                activation = 'relu'
+                include_activation=True
+
+            if include_activation:
+                include_activation=False
+                if layer in special_relu:
+                    shape = layer.output_shape
+                    h, w, c = shape[1:]
+                    _layer_type = 'Conv2D'
+                    num_str = self.format_layer_idx(idx)
+                    shape_str = '{}x{}x{}'.format(*shape[1:])
+                    weights = np.zeros([1, 1, c, c])
+                    for k in range(c):
+                        weights[:, :, k, k] = 1
+                    self._layer_list.append({
+                        'name': num_str + 'ACTIV_' + _layer_type + '_' + shape_str,
+                        'layer_type': _layer_type,
+                        'inbound': [self._layer_list[-1]['name']],
+                        'filters': c,
+                        'activation': 'relu',
+                        'parameters': (weights, np.zeros(c)),
+                        'kernel_size': 1})
+                    name_map[str(id(layer))] = idx
+                    idx += 1
+                else:
+                    self._layer_list[-1]['activation'] = activation
+
+            if layer_type not in snn_layers:
+                print("Skipping layer {}.".format(layer_type))
+                continue
+
+            # if not inserted_flatten:
+            #     inserted_flatten = self.try_insert_flatten(layer, idx,
+            #                                                name_map)
+            #     idx += inserted_flatten
+
+            print("Parsing layer {}.".format(layer_type))
+
+            if layer_type == 'MaxPooling2D' and \
+                    self.config.getboolean('conversion', 'max2avg_pool'):
+                print("Replacing max by average pooling.")
+                layer_type = 'AveragePooling2D'
+
+            # If we inserted a layer, need to set the right inbound layer here.
+            if inserted_flatten:
+                inbound = [self._layer_list[-1]['name']]
+                inserted_flatten = False
+            else:
+
+                ###################################################################
+                ###################################################################
+
+                if prev_out_idx is None or layer not in in_layers:
+                    if need_rewire:
+                        inbound = [self._layer_list[-1]['name']]
+                    else:
+                        inbound = self.get_inbound_names(layer, name_map)
+                else:
+                    inbound = []
+                    for j,in_layer in enumerate(in_layers):
+                        if layer==in_layer:
+                            inbound.append(self._layer_list[prev_out_idx[j]]['name'])
+                    
+
+            attributes = self.initialize_attributes(layer)
+
+            attributes.update({'layer_type': layer_type,
+                               'name': self.get_name(layer, idx),
+                               'inbound': inbound})
+
+            if layer_type == 'UpSampling2D':
+                attributes.update({'size': layer.size})
+            
+            if layer_type == 'Dense':
+                self.parse_dense(layer, attributes)
+
+            if layer_type == 'Sparse':
+                self.parse_sparse(layer, attributes)
+
+            if layer_type in {'Conv1D', 'Conv2D'}:
+                attributes = self.parse_convolution(layer, attributes)
+
+            if layer_type == 'SparseConv2D':
+                self.parse_sparse_convolution(layer, attributes)
+
+            if layer_type == 'DepthwiseConv2D':
+                self.parse_depthwiseconvolution(layer, attributes)
+
+            if layer_type == 'SparseDepthwiseConv2D':
+                self.parse_sparse_depthwiseconvolution(layer, attributes)
+
+            if layer_type in ['Sparse', 'SparseConv2D',
+                              'SparseDepthwiseConv2D']:
+                weights, bias, mask = attributes['parameters']
+
+                weights, bias = modify_parameter_precision(
+                    weights, bias, self.config, attributes)
+
+                attributes['parameters'] = (weights, bias, mask)
+
+                #self.absorb_activation(layer, attributes)
+
+            if layer_type in {'Dense', 'Conv1D', 'Conv2D', 'DepthwiseConv2D'}:
+                weights, bias = attributes['parameters']
+
+                weights, bias = modify_parameter_precision(
+                    weights, bias, self.config, attributes)
+
+                attributes['parameters'] = (weights, bias)
+
+                #self.absorb_activation(layer, attributes)
+
+            if 'Pooling' in layer_type:
+                self.parse_pooling(layer, attributes)
+
+            if layer_type == 'Concatenate':
+                self.parse_concatenate(layer, attributes)
+
+            self._layer_list.append(attributes)
+
+            # Map layer index to layer id. Needed for inception modules.
+            name_map[str(id(layer))] = idx
+
+            if is_output:
+                # get output layers references
+                for i,out_layer in enumerate(out_layers):
+                    if layer==out_layer:
+                        out_links[i]=idx
+
+            idx += 1
+        print('')
+
+        return idx,out_links
+
+
     def parse(self):
         """Extract the essential information about a neural network.
 
@@ -513,12 +802,14 @@ class AbstractModelParser:
         if layer_type is None:
             layer_type = self.get_type(layer)
 
-        output_shape = self.get_output_shape(layer)
-
-        shape_string = ["{}x".format(x) for x in output_shape[1:]]
-        shape_string[0] = "_" + shape_string[0]
-        shape_string[-1] = shape_string[-1][:-1]
-        shape_string = "".join(shape_string)
+        try:
+            output_shape = self.get_output_shape(layer)
+            shape_string = ["{}x".format(x) for x in output_shape[1:]]
+            shape_string[0] = "_" + shape_string[0]
+            shape_string[-1] = shape_string[-1][:-1]
+            shape_string = "".join(shape_string)
+        except:
+            shape_string = "MULT"
 
         num_str = self.format_layer_idx(idx)
 
@@ -820,6 +1111,47 @@ class AbstractModelParser:
         # Todo: Enable adding custom metric via self.input_model.metrics.
         self.parsed_model.summary()
         return self.parsed_model
+
+
+    def build_parsed_RNet(self, loss_fn, optimizer, metrics=None):
+
+        img_input = keras.layers.Input(
+            batch_shape=self.get_batch_input_shape(),
+            name=self.input_layer_name)
+        parsed_layers = {self.input_layer_name: img_input}
+        print("Building parsed model...\n")
+        for layer in self._layer_list:
+            # Replace 'parameters' key with Keras key 'weights'
+            if 'parameters' in layer:
+                layer['weights'] = layer.pop('parameters')
+
+            # Add layer
+            layer_type = layer.pop('layer_type')
+            if hasattr(keras.layers, layer_type):
+                parsed_layer = getattr(keras.layers, layer_type)
+            else:
+                import keras_rewiring
+                parsed_layer = getattr(keras_rewiring.sparse_layer, layer_type)
+
+            inbound = [parsed_layers[inb] for inb in layer.pop('inbound')]
+            if len(inbound) == 1:
+                inbound = inbound[0]
+            check_for_custom_activations(layer)
+            parsed_layers[layer['name']] = parsed_layer(**layer)(inbound)
+
+        print("Compiling parsed model...\n")
+        self.parsed_model = keras.models.Model(img_input, parsed_layers[
+            self._layer_list[-1]['name']])
+
+        if metrics is not None:
+            self.parsed_model.compile(loss=loss_fn, optimizer=optimizer, metrics=metrics)
+        else:
+            self.parsed_model.compile(loss=loss_fn, optimizer=optimizer)
+
+        self.parsed_model.summary()
+        return self.parsed_model
+
+
 
     def evaluate(self, batch_size, num_to_test, x_test=None, y_test=None,
                  dataflow=None):

@@ -91,15 +91,14 @@ def run_pipeline(config, queue=None):
         # ___________________________ NORMALIZE _____________________________ #
 
         if config.getboolean('tools', 'normalize') and not is_stop(queue):
+
             normalize_parameters(parsed_model, config, **normset)
 
         # Evaluate parsed model.
         if config.getboolean('tools', 'evaluate_ann') and not is_stop(queue):
             print("Evaluating parsed model on {} samples...".format(
                 num_to_test))
-            score = model_parser.evaluate(
-                config.getint('simulation', 'batch_size'),
-                num_to_test, **testset)
+            score = model_parser.evaluate(config.getint('simulation', 'batch_size'), num_to_test, **testset)
             results = [score[1]]
 
         # Write parsed model to disk

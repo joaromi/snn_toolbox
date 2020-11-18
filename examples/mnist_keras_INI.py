@@ -18,6 +18,9 @@ from tensorflow.keras.layers import Conv2D, AveragePooling2D, Flatten, Dense, \
 from tensorflow.keras.datasets import mnist
 from tensorflow.keras.utils import to_categorical
 
+import site
+import sys
+site.addsitedir('C:/Users/joaro/Documents/GitHub/snn_toolbox')
 from snntoolbox.bin.run import main
 from snntoolbox.utils.utils import import_configparser
 

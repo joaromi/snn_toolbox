@@ -97,6 +97,39 @@ class SNN(AbstractSNN):
     def build_pooling(self, layer):
         pass
 
+    def compile_RNet(self, loss_fn, optimizer):
+
+        self.snn = keras.models.Model(
+            self._input_images,
+            self._spiking_layers[self.parsed_model.layers[-1].name])
+        self.snn.compile(loss=loss_fn, optimizer=optimizer)
+
+        # Tensorflow 2 lists all variables as weights, including our state
+        # variables (membrane potential etc). So a simple
+        # snn.set_weights(parsed_model.get_weights()) does not work any more.
+        # Need to extract the actual weights here.
+
+        parameter_map = {remove_name_counter(p.name): v for p, v in
+                         zip(self.parsed_model.weights,
+                             self.parsed_model.get_weights())}
+        count = 0
+        for p in self.snn.weights:
+            name = remove_name_counter(p.name)
+            if name in parameter_map:
+                keras.backend.set_value(p, parameter_map[name])
+                count += 1
+        assert count == len(parameter_map), "Not all weights have been " \
+                                            "transferred from ANN to SNN."
+
+        for layer in self.snn.layers:
+            if hasattr(layer, 'bias'):
+                # Adjust biases to time resolution of simulator.
+                bias = keras.backend.get_value(layer.bias) * self._dt
+                keras.backend.set_value(layer.bias, bias)
+                if self.config.getboolean('cell', 'bias_relaxation'):
+                    keras.backend.set_value(
+                        layer.b0, keras.backend.get_value(layer.bias))
+
     def compile(self):
 
         self.snn = keras.models.Model(
@@ -129,6 +162,55 @@ class SNN(AbstractSNN):
                 if self.config.getboolean('cell', 'bias_relaxation'):
                     keras.backend.set_value(
                         layer.b0, keras.backend.get_value(layer.bias))
+
+
+    def simulate_RNet(self, x=None, y=None, num_detections=200000):
+        from snntoolbox.utils.utils import echo
+        from snntoolbox.simulation.utils import get_layer_synaptic_operations
+
+        input_b_l = x * self._dt
+        num_timesteps = self._get_timestep_at_spikecount(input_b_l)
+        output_b_l_t = np.zeros((self.batch_size, num_detections, 4+self.num_classes,
+                                 self._num_timesteps))
+
+        detected = 0
+        self._input_spikecount = 0
+        for sim_step_int in range(num_timesteps):
+            sim_step = (sim_step_int + 1) * self._dt
+            self.set_time(sim_step)
+
+            out_spikes = self.snn.predict_on_batch(input_b_l)
+            detected = max(detected, out_spikes.shape[-2])
+
+            output_b_l_t[:, :out_spikes.shape[-2], :, sim_step_int] = out_spikes > 0
+
+        output_b_l_t = output_b_l_t[:, :detected, :, :]
+        return np.cumsum(output_b_l_t, -1)
+
+    def simulate_RNet_light(self, x=None, y=None, num_detections=200000):
+        from snntoolbox.utils.utils import echo
+        from snntoolbox.simulation.utils import get_layer_synaptic_operations
+
+        input_b_l = x * self._dt
+        num_timesteps = self._get_timestep_at_spikecount(input_b_l)
+        output_b_l_t = np.zeros((self.batch_size, num_detections, 4+self.num_classes))
+
+        detected = 0
+        self._input_spikecount = 0
+        for sim_step_int in range(num_timesteps):
+            sim_step = (sim_step_int + 1) * self._dt
+            self.set_time(sim_step)
+
+            out_spikes = self.snn.predict_on_batch(input_b_l)
+            detected = max(detected, out_spikes.shape[-2])
+
+            output_b_l_t[:, :out_spikes.shape[-2], :] += out_spikes[0] > 0
+
+        output_b_l_t = output_b_l_t[:, :detected, :]
+        return np.cumsum(output_b_l_t, -1)
+
+            
+
 
     def simulate(self, **kwargs):
 
@@ -254,7 +336,7 @@ class SNN(AbstractSNN):
 
     def load(self, path, filename):
 
-        from snntoolbox.simulation.backends.inisim.temporal_mean_rate_theano \
+        from snntoolbox.simulation.backends.inisim.temporal_mean_rate_tensorflow \
             import custom_layers
 
         filepath = os.path.join(path, filename + '.h5')

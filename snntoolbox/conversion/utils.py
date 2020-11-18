@@ -20,7 +20,7 @@ from tensorflow.keras.models import Model
 import numpy as np
 
 
-def normalize_parameters(model, config, **kwargs):
+def normalize_parameters(model, config, free_GB=2, **kwargs):
     """Normalize the parameters of a network.
 
     The parameters of each layer are normalized with respect to the maximum
@@ -76,11 +76,19 @@ def normalize_parameters(model, config, **kwargs):
             x_norm = np.concatenate(x_norm)
         print("Using {} samples for normalization.".format(len(x_norm)))
         sizes = [
-            len(x_norm) * np.array(layer.output_shape[1:]).prod() * 32 /
-            (8 * 1e9) for layer in model.layers if len(layer.weights) > 0]
+            len(x_norm) * float(np.array(layer.output_shape[1:]).prod()) * float(32 /(8 * 1e9)) \
+                 for layer in model.layers if len(layer.weights) > 0 ]
         size_str = ['{:.2f}'.format(s) for s in sizes]
-        print("INFO: Need {} GB for layer activations.\n".format(size_str) +
-              "May have to reduce size of data set used for normalization.")
+        print('INFO: Size of layer activations: ', size_str ,'GB\n')       
+        req_space = max(sizes)
+        print("Required {:.2f} GB of free space for the largest activation. \n".format(req_space))
+        print("In total, {:.2f} GB of information flow. \n".format(sum(sizes)))
+        if req_space > free_GB:
+            import warnings
+            warnings.warn("Required space is larger than specified free space of "+str(free_GB)+
+            "GB. Reduce size of data set or increase available space.", ResourceWarning)
+            print('[Skipping normalization]')
+            return
         scale_facs = OrderedDict({model.layers[0].name: 1})
     else:
         import warnings

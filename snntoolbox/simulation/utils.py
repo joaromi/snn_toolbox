@@ -409,6 +409,50 @@ class AbstractSNN:
 
         pass
 
+    def build_RNet(self, parsed_model, loss_fn, optimizer, num_classes = 80):
+        """Assemble a spiking neural network to prepare for simulation.
+
+        Parameters
+        ----------
+
+        parsed_model: keras.models.Model
+            Parsed input model.
+        """
+
+        print("Building spiking model...")
+
+        self.num_classes = num_classes
+
+        self.parsed_model = parsed_model
+
+        # Get batch input shape
+        batch_shape = \
+            list(fix_input_layer_shape(parsed_model.layers[0].input_shape))
+        batch_shape[0] = self.batch_size
+        if self.config.get('conversion', 'spike_code') == 'ttfs_dyn_thresh':
+            batch_shape[0] *= 2
+
+        #self.preprocessing(**kwargs)
+
+        # Iterate over layers to create spiking neurons and connections.
+        self.setup_layers(batch_shape)
+
+        print("Compiling spiking model...\n")
+        self.compile_RNet(loss_fn, optimizer)
+
+        # Compute number of operations of ANN.
+        if self.fanout is None:
+            self.set_connectivity()
+            self.operations_ann = get_ann_ops(self.num_neurons,
+                                              self.num_neurons_with_bias,
+                                              self.fanin)*1e6
+            print("Number of operations of ANN: {}".format(
+                self.operations_ann))
+            print("Number of neurons: {}".format(sum(self.num_neurons[1:])))
+            print("Number of synapses: {}\n".format(self.num_synapses))
+
+        self.is_built = True
+
     def build(self, parsed_model, **kwargs):
         """Assemble a spiking neural network to prepare for simulation.
 
@@ -1689,7 +1733,7 @@ def get_ann_ops(num_neurons, num_neurons_with_bias, fanin):
 
     """
 
-    return 2 * np.dot(num_neurons, fanin) + np.sum(num_neurons_with_bias)
+    return 2.*np.dot(np.array(num_neurons)/1e3, np.array(fanin)/1e3) + np.sum(num_neurons_with_bias)/1e6
 
 
 def estimate_snn_ops(activations_n_b_l, fanouts_n, num_timesteps):

@@ -17,7 +17,7 @@ import json
 
 import tensorflow as tf
 from tensorflow.keras.layers import Dense, Flatten, AveragePooling2D, \
-    MaxPooling2D, Conv2D, DepthwiseConv2D, ZeroPadding2D, Reshape, Layer, \
+    MaxPooling2D, Conv2D, DepthwiseConv2D, UpSampling2D, ZeroPadding2D, Reshape, Layer, \
     Concatenate
 
 from snntoolbox.parsing.utils import get_inbound_layers
@@ -583,6 +583,37 @@ class SpikeZeroPadding2D(ZeroPadding2D):
         """Get class name."""
 
         return self.__class__.__name__
+
+
+
+class SpikeUpSampling2D(UpSampling2D):
+    """Spike UpSampling2D layer."""
+
+    def __init__(self, **kwargs):
+        kwargs.pop(str('config'))
+        UpSampling2D.__init__(self, **kwargs)
+
+    def call(self, x, mask=None):
+
+        return UpSampling2D.call(self, x)
+
+    @staticmethod
+    def get_time():
+
+        pass
+
+    @staticmethod
+    def reset(sample_idx):
+        """Reset layer variables."""
+
+        pass
+
+    @property
+    def class_name(self):
+        """Get class name."""
+
+        return self.__class__.__name__
+
 
 
 class SpikeReshape(Reshape):
