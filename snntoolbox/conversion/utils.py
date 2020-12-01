@@ -18,6 +18,483 @@ import json
 from collections import OrderedDict
 from tensorflow.keras.models import Model
 import numpy as np
+import tensorflow as tf
+
+
+def layer_norm(model, config, norm_set=None, num_samples=None, divisions=1, free_GB=2, layers_to_plot=[], equiv_layers=[], **kwargs):
+
+    from snntoolbox.parsing.utils import get_inbound_layers_with_params
+
+    print("Normalizing parameters...")
+
+    norm_dir = kwargs[str('path')] if 'path' in kwargs else \
+        os.path.join(config.get('paths', 'path_wd'),
+                     'layer_norm')
+
+    activ_dir = os.path.join(norm_dir, 'activations')
+    norm_activ_dir = os.path.join(norm_dir, 'norm_activations')
+    if not os.path.exists(activ_dir):
+        os.makedirs(activ_dir)
+    # Store original weights for later plotting
+    if not os.path.isfile(os.path.join(activ_dir, 'weights.npz')):
+        weights = {}
+        for layer in model.layers:
+            w = layer.get_weights()
+            if len(w) > 0:
+                weights[layer.name] = w[0]
+        np.savez_compressed(os.path.join(activ_dir, 'weights.npz'), **weights)
+
+    batch_size = config.getint('simulation', 'batch_size')
+
+    # Either load scale factors from disk, or get normalization data set to
+    # calculate them.
+    filepath = os.path.join(norm_dir, config.get('normalization',
+                                                'percentile') + '.json')
+    if 'scale_facs' in kwargs:
+        scale_facs = kwargs[str('scale_facs')]
+        print('(*) Scale factors input as **kwargs to the function')
+    elif os.path.isfile(filepath):
+        with open(filepath) as f:
+            scale_facs = json.load(f)
+        print('(*) Scale factors loaded from previous run: [', filepath, ']')
+    elif norm_set is not None: 
+        samples_in_division = int(num_samples/divisions) 
+        print('(*) Computing scale factors from the model. This might take a while...')    
+        print("Using {} samples for normalization: {} packs of {} samples".format(num_samples,
+                                                                            divisions,
+                                                                            samples_in_division))
+        sizes = [
+            samples_in_division * float(np.array(layer.output_shape[1:]).prod()) * float(32 /(8 * 1e9)) \
+                 for layer in model.layers if len(layer.weights) > 0 ]
+        size_str = ['{:.2f}'.format(s) for s in sizes]
+        print('INFO: Size of layer activations: ', size_str ,'GB\n')       
+        req_space = max(sizes)
+        print("Required {:.2f} GB of free space for the largest activation. \n".format(req_space))
+        print("In total, {:.2f} GB of information flow. \n".format(sum(sizes)))
+        if req_space > free_GB:
+            import warnings
+            warnings.warn("Required space is larger than specified free space of "+str(free_GB)+
+            "GB. Reduce size of data set or increase available space.", ResourceWarning)
+            print('[Skipping normalization]')
+            return
+        scale_facs = OrderedDict({model.layers[0].name: 1})
+    else:
+        import warnings
+        warnings.warn("Scale factors or normalization data set could not be "
+                      "loaded. Proceeding without normalization.",
+                      RuntimeWarning)
+        return
+
+    # If scale factors have not been computed in a previous run, do so now.
+    if len(scale_facs) == 1:
+        i = 0
+        for layer in model.layers:
+            # Skip if layer has no parameters
+            if len(layer.weights) == 0:
+                continue
+            perc = get_percentile(config, i)
+            accum_samples=0
+            layer_lambdas = []
+            x = []
+            for sample in norm_set.take(num_samples):
+                x.append(np.array(sample[0], dtype=np.float32))
+                accum_samples+=1
+                if accum_samples>=samples_in_division:
+                    accum_samples = 0
+                    x = np.array(x)[:,0]
+                    tf.keras.backend.clear_session()
+                    activations = np.array(Model(model.input, layer.output).predict(x, batch_size))
+                    nonzero_activations = activations[np.nonzero(activations)]
+                    x = []
+                    if layer.name in layers_to_plot and not layer_lambdas:    
+                        print("Writing activations to disk...")
+                        np.savez_compressed(os.path.join(activ_dir, layer.name), activations)
+                    del activations
+                    layer_lambdas.append(get_scale_fac(nonzero_activations, perc))
+                    del nonzero_activations
+            layer_lambdas = np.array(layer_lambdas)
+            scale_facs[layer.name] = np.average(layer_lambdas)
+            print("Layer "+str(layer.name)+" - Scale factor: {:.2f} ± {:.2f}.".format(scale_facs[layer.name],
+                                                    max(abs(scale_facs[layer.name]-layer_lambdas))))
+            i += 1
+        del x
+        # Write scale factors to disk
+        filepath = os.path.join(norm_dir, config.get('normalization',
+                                                     'percentile') + '.json')
+        from snntoolbox.utils.utils import confirm_overwrite
+        if config.get('output', 'overwrite') or confirm_overwrite(filepath):
+            with open(filepath, str('w')) as f:
+                json.dump(scale_facs, f)
+
+    # Fix RNet heads, they need to be equally weighted
+    if equiv_layers:
+        for layer in model.layers:
+            for ix,group in enumerate(equiv_layers):
+                if layer.name in group:
+                    refs = equiv_layers.pop(ix)
+                    scale_fac = 0
+                    for ref in refs: scale_fac += scale_facs[ref] # average
+                    scale_fac /= len(refs)
+                    for ref in refs: scale_facs[ref] = scale_fac
+                    del refs, scale_fac
+        
+        filepath = os.path.join(norm_dir, config.get('normalization',
+                                                     'percentile') + '_mod.json')
+        with open(filepath, str('w')) as f:
+            json.dump(scale_facs, f)
+
+
+    # Apply scale factors to normalize the parameters.
+    for layer in model.layers:
+        # Skip if layer has no parameters
+        if len(layer.weights) == 0:
+            continue
+
+        # Scale parameters
+        parameters = layer.get_weights()
+        if layer.activation.__name__ == 'softmax':
+            # When using a certain percentile or even the max, the scaling
+            # factor can be extremely low in case of many output classes
+            # (e.g. 0.01 for ImageNet). This amplifies weights and biases
+            # greatly. But large biases cause large offsets in the beginning
+            # of the simulation (spike input absent).
+            scale_fac = 1.0
+            print("Using scale factor {:.2f} for softmax layer.".format(
+                scale_fac))
+        else:
+            scale_fac = scale_facs[layer.name]
+        inbound = get_inbound_layers_with_params(layer)
+        if len(inbound) == 0:  # Input layer
+            parameters_norm = [
+                parameters[0] * scale_facs[model.layers[0].name] / scale_fac,
+                parameters[1] / scale_fac]
+        elif len(inbound) == 1:
+            parameters_norm = [
+                parameters[0] * scale_facs[inbound[0].name] / scale_fac,
+                parameters[1] / scale_fac]
+        else:
+            # In case of this layer receiving input from several layers, we can
+            # apply scale factor to bias as usual, but need to rescale weights
+            # according to their respective input.
+            parameters_norm = [parameters[0], parameters[1] / scale_fac]
+            if parameters[0].ndim == 4:
+                # In conv layers, just need to split up along channel dim.
+                offset = 0  # Index offset at input filter dimension
+                for inb in inbound:
+                    f_out = inb.filters  # Num output features of inbound layer
+                    f_in = range(offset, offset + f_out)
+                    parameters_norm[0][:, :, f_in, :] *= \
+                        scale_facs[inb.name] / scale_fac
+                    offset += f_out
+            else:
+                # Fully-connected layers need more consideration, because they
+                # could receive input from several conv layers that are
+                # concatenated and then flattened. The neuron position in the
+                # flattened layer depend on the image_data_format.
+                raise NotImplementedError
+
+        # Check if the layer happens to be Sparse
+        # if the layer is sparse, add the mask to the list of parameters
+        if len(parameters) == 3:
+            parameters_norm.append(parameters[-1])
+        # Update model with modified parameters
+        layer.set_weights(parameters_norm)
+
+    # Plot distributions of weights and activations before and after norm.
+    if 'normalization_activations' in eval(config.get('output', 'plot_vars')) and layers_to_plot:
+        from snntoolbox.simulation.plotting import plot_hist
+        from snntoolbox.simulation.plotting import plot_max_activ_hist
+
+        # All layers in one plot. Assumes model.get_weights() returns
+        # [w, b, w, b, ...].
+        # from snntoolbox.simulation.plotting import plot_weight_distribution
+        # plot_weight_distribution(norm_dir, model)
+
+        print("Plotting distributions of weights and activations before and "
+              "after normalizing...")
+
+        # Load original parsed model to get parameters before normalization
+        weights = np.load(os.path.join(activ_dir, 'weights.npz'))
+
+        x=[]
+        for sample in norm_set.take(samples_in_division):
+            x.append(np.array(sample[0], dtype=np.float32))
+        x = np.array(x)[:,0]
+                
+        for idx, layer in enumerate(model.layers):
+            # Skip if layer has no parameters
+            if len(layer.weights) == 0 or layer.name not in layers_to_plot:
+                continue
+
+            label = str(idx) + layer.__class__.__name__ \
+                if config.getboolean('output', 'use_simple_labels') \
+                else layer.name
+            parameters = weights[layer.name]
+            parameters_norm = layer.get_weights()[0]
+            weight_dict = {'weights': parameters.flatten(),
+                           'weights_norm': parameters_norm.flatten()}
+            plot_hist(weight_dict, 'Weight', label, norm_dir)
+
+            # Load activations of model before normalization
+            try:
+                activations = np.load(os.path.join(activ_dir, layer.name + '.npz'))['arr_0']
+            except IOError:
+                    print('Error when loading activations from [',
+                            os.path.join(activ_dir, layer.name + '.npz'),
+                            ']. \n...Skipping layer...')
+                    continue
+
+            if activations is None:
+                continue
+
+            # Compute activations with modified parameters
+            nonzero_activations = activations[np.nonzero(activations)]
+            tf.keras.backend.clear_session()
+            activations_norm = np.array(Model(model.input, layer.output).predict(x, batch_size))
+            activation_dict = {'Activations': nonzero_activations,
+                               'Activations_norm':
+                               activations_norm[np.nonzero(activations_norm)]}
+            scale_fac = scale_facs[layer.name]
+            plot_hist(activation_dict, 'Activation', label, norm_dir,
+                      scale_fac)
+            ax = tuple(np.arange(len(layer.output_shape))[1:])
+            plot_max_activ_hist(
+                {'Activations_max': np.max(activations, axis=ax)},
+                'Maximum Activation', label, norm_dir, scale_fac)
+            np.savez_compressed(os.path.join(norm_activ_dir, layer.name), activations_norm)
+    print('')
+
+
+def channel_norm(model, config, norm_set=None, num_samples=None, divisions=1, free_GB=2, layers_to_plot=[], equiv_layers=[], **kwargs):
+
+    from snntoolbox.parsing.utils import get_inbound_layers_with_params
+
+    print("Normalizing parameters...")
+
+    norm_dir = kwargs[str('path')] if 'path' in kwargs else \
+        os.path.join(config.get('paths', 'path_wd'),
+                     'channel_norm')
+
+    activ_dir = os.path.join(norm_dir, 'activations')
+    norm_activ_dir = os.path.join(norm_dir, 'norm_activations')
+    if not os.path.exists(activ_dir):
+        os.makedirs(activ_dir)
+    # Store original weights for later plotting
+    if not os.path.isfile(os.path.join(activ_dir, 'weights.npz')):
+        weights = {}
+        for layer in model.layers:
+            w = layer.get_weights()
+            if len(w) > 0:
+                weights[layer.name] = w[0]
+        np.savez_compressed(os.path.join(activ_dir, 'weights.npz'), **weights)
+
+    batch_size = config.getint('simulation', 'batch_size')
+
+    # Either load scale factors from disk, or get normalization data set to
+    # calculate them.
+    filepath = os.path.join(norm_dir, config.get('normalization',
+                                                'percentile') + '.json')
+    if 'scale_facs' in kwargs:
+        scale_facs = kwargs[str('scale_facs')]
+        print('(*) Scale factors input as **kwargs to the function')
+    elif os.path.isfile(filepath):
+        with open(filepath) as f:
+            scale_facs = json.load(f)
+        print('(*) Scale factors loaded from previous run: [', filepath, ']')
+    elif norm_set is not None: 
+        samples_in_division = int(num_samples/divisions) 
+        print('(*) Computing scale factors from the model. This might take a while...')    
+        print("Using {} samples for normalization: {} packs of {} samples".format(num_samples,
+                                                                            divisions,
+                                                                            samples_in_division))
+        sizes = [
+            samples_in_division * float(np.array(layer.output_shape[1:]).prod()) * float(32 /(8 * 1e9)) \
+                 for layer in model.layers if len(layer.weights) > 0 ]
+        size_str = ['{:.2f}'.format(s) for s in sizes]
+        print('INFO: Size of layer activations: ', size_str ,'GB\n')       
+        req_space = max(sizes)
+        print("Required {:.2f} GB of free space for the largest activation. \n".format(req_space))
+        print("In total, {:.2f} GB of information flow. \n".format(sum(sizes)))
+        if req_space > free_GB:
+            import warnings
+            warnings.warn("Required space is larger than specified free space of "+str(free_GB)+
+            "GB. Reduce size of data set or increase available space.", ResourceWarning)
+            print('[Skipping normalization]')
+            return
+        scale_facs = OrderedDict({model.layers[0].name: 1})
+    else:
+        import warnings
+        warnings.warn("Scale factors or normalization data set could not be "
+                      "loaded. Proceeding without normalization.",
+                      RuntimeWarning)
+        return
+
+    # If scale factors have not been computed in a previous run, do so now.
+    if len(scale_facs) == 1:
+        i = 0
+        for layer in model.layers:
+            # Skip if layer has no parameters
+            if len(layer.weights) == 0:
+                continue
+            perc = get_percentile(config, i)
+            accum_samples=0
+            layer_lambdas = []
+            x = []
+            for sample in norm_set.take(num_samples):
+                x.append(np.array(sample[0], dtype=np.float32))
+                accum_samples+=1
+                if accum_samples>=samples_in_division:
+                    accum_samples = 0
+                    x = np.array(x)[:,0]
+                    tf.keras.backend.clear_session()
+                    activations = np.array(Model(model.input, layer.output).predict(x, batch_size))
+                    x = []
+                    if layer.name in layers_to_plot and not layer_lambdas:    
+                        print("Writing "+layer.name+"'s activations to disk...")
+                        np.savez_compressed(os.path.join(activ_dir, layer.name), activations)
+                    layer_lambdas.append(get_scale_fac_channel(activations, perc))
+                    del activations
+            layer_lambdas = np.array(layer_lambdas)
+            scale_facs[layer.name] = np.average(layer_lambdas, axis=0).tolist()
+            print("[✓]  Layer "+str(layer.name))
+            i += 1
+        del x
+        # Write scale factors to disk
+        filepath = os.path.join(norm_dir, config.get('normalization',
+                                                     'percentile') + '.json')
+        from snntoolbox.utils.utils import confirm_overwrite
+        if config.get('output', 'overwrite') or confirm_overwrite(filepath):
+            with open(filepath, str('w')) as f:
+                json.dump(scale_facs, f)
+
+    # Fix RNet heads, they need to be equally weighted
+    if equiv_layers:
+        for layer in model.layers:
+            for ix,group in enumerate(equiv_layers):
+                if layer.name in group:
+                    refs = equiv_layers.pop(ix)
+                    scale_fac = np.zeros(scale_facs[refs[0].size])
+                    for ref in refs: scale_fac += np.array(scale_facs[ref]) # average
+                    scale_fac /= float(len(refs))
+                    for ref in refs: scale_facs[ref] = scale_fac.tolist()
+                    del refs, scale_fac
+        
+        filepath = os.path.join(norm_dir, config.get('normalization',
+                                                     'percentile') + '_mod.json')
+        with open(filepath, str('w')) as f:
+            json.dump(scale_facs, f)
+
+
+    # Apply scale factors to normalize the parameters.
+    for layer in model.layers:
+        # Skip if layer has no parameters
+        if len(layer.weights) == 0:
+            continue
+
+        # Scale parameters
+        parameters = layer.get_weights()
+        scale_fac = np.array(scale_facs[layer.name])
+        inbound = get_inbound_layers_with_params(layer)
+
+        if parameters[0].ndim != 4:
+            # Fully-connected layers need more consideration, because they
+            # could receive input from several conv layers that are
+            # concatenated and then flattened. The neuron position in the
+            # flattened layer depend on the image_data_format.
+            raise NotImplementedError
+
+        in_ch = parameters[0].shape[-2]
+        out_ch = parameters[0].shape[-1]
+
+        parameters_norm = parameters
+
+        parameters_norm[1] = parameters[1]/scale_fac
+        if len(inbound) == 0:  # Input layer
+            parameters_norm[0] /= scale_fac
+        elif len(inbound) == 1:
+            for i in in_ch:
+                parameters_norm[0][:, :, i] *= scale_facs[inbound[0].name][i]/scale_fac
+        else:
+            offset = 0  # Index offset at input filter dimension
+            for inb in inbound:
+                f_out = inb.filters  # Num output features of inbound layer
+                for i in range(f_out):
+                    parameters_norm[0][:, :, i+offset] *= scale_facs[inb.name][i]/scale_fac
+                offset += f_out
+        
+        # Check if the layer happens to be Sparse
+        # if the layer is sparse, add the mask to the list of parameters
+        if len(parameters) == 3:
+            parameters_norm.append(parameters[-1])
+        # Update model with modified parameters
+        layer.set_weights(parameters_norm)
+
+    # Plot distributions of weights and activations before and after norm.
+    if 'normalization_activations' in eval(config.get('output', 'plot_vars')) and layers_to_plot:
+        from snntoolbox.simulation.plotting import plot_hist
+        from snntoolbox.simulation.plotting import plot_max_activ_hist
+
+        # All layers in one plot. Assumes model.get_weights() returns
+        # [w, b, w, b, ...].
+        # from snntoolbox.simulation.plotting import plot_weight_distribution
+        # plot_weight_distribution(norm_dir, model)
+
+        print("Plotting distributions of weights and activations before and "
+              "after normalizing...")
+
+        # Load original parsed model to get parameters before normalization
+        weights = np.load(os.path.join(activ_dir, 'weights.npz'))
+
+        x=[]
+        for sample in norm_set.take(samples_in_division):
+            x.append(np.array(sample[0], dtype=np.float32))
+        x = np.array(x)[:,0]
+                
+        for idx, layer in enumerate(model.layers):
+            # Skip if layer has no parameters
+            if len(layer.weights) == 0 or layer.name not in layers_to_plot:
+                continue
+
+            label = str(idx) + layer.__class__.__name__ \
+                if config.getboolean('output', 'use_simple_labels') \
+                else layer.name
+            parameters = weights[layer.name]
+            parameters_norm = layer.get_weights()[0]
+            weight_dict = {'weights': parameters.flatten(),
+                           'weights_norm': parameters_norm.flatten()}
+            plot_hist(weight_dict, 'Weight', label, norm_dir)
+
+            # Load activations of model before normalization
+            try:
+                activations = np.load(os.path.join(activ_dir, layer.name + '.npz'))['arr_0']
+            except IOError:
+                    print('Error when loading activations from [',
+                            os.path.join(activ_dir, layer.name + '.npz'),
+                            ']. \n...Skipping layer...')
+                    continue
+
+            if activations is None:
+                continue
+
+            # Compute activations with modified parameters
+            nonzero_activations = activations[np.nonzero(activations)]
+            tf.keras.backend.clear_session()
+            activations_norm = np.array(Model(model.input, layer.output).predict(x, batch_size))
+            activation_dict = {'Activations': nonzero_activations,
+                               'Activations_norm':
+                               activations_norm[np.nonzero(activations_norm)]}
+            scale_fac = scale_facs[layer.name]
+            plot_hist(activation_dict, 'Activation', label, norm_dir,
+                      scale_fac)
+            ax = tuple(np.arange(len(layer.output_shape))[1:])
+            plot_max_activ_hist(
+                {'Activations_max': np.max(activations, axis=ax)},
+                'Maximum Activation', label, norm_dir, scale_fac)
+            np.savez_compressed(os.path.join(norm_activ_dir, layer.name), activations_norm)
+    print('')
+
+
+
 
 
 def normalize_parameters(model, config, free_GB=2, **kwargs):
@@ -131,8 +608,6 @@ def normalize_parameters(model, config, free_GB=2, **kwargs):
             #         settings['softmax_to_relu'] = False
             i += 1
         # Write scale factors to disk
-        filepath = os.path.join(norm_dir, config.get('normalization',
-                                                     'percentile') + '.json')
         from snntoolbox.utils.utils import confirm_overwrite
         if config.get('output', 'overwrite') or confirm_overwrite(filepath):
             with open(filepath, str('w')) as f:
@@ -272,6 +747,35 @@ def get_scale_fac(activations, percentile):
 
     return np.percentile(activations, percentile) if activations.size else 1
 
+def get_scale_fac_channel(activations, percentile):
+    """
+    Determine the activation value at ``percentile`` of the layer distribution per channel.
+
+    Parameters
+    ----------
+
+    activations: np.array
+        The activations of cells in a specific layer.
+
+    percentile: int
+        Percentile at which to determine activation.
+
+    Returns
+    -------
+
+    scale_fac: float
+        Maximum (or percentile) of activations in each channel of this layer.
+        Parameters of the respective layer are scaled by this value.
+    """
+
+    num_channels = activations.shape[-1]
+    scale_facs = np.zeros(num_channels)
+
+    for j in range(num_channels):
+        scale_facs[j] = np.percentile(activations[:,:,:,j], percentile)
+
+    return scale_facs
+
 
 def get_percentile(config, layer_idx=None):
     """Get percentile at which to draw the maximum activation of a layer.
@@ -356,7 +860,7 @@ def get_activations_layer(layer_in, layer_out, x, batch_size=None):
         The activations of cells in a specific layer. Has the same shape as
         ``layer_out``.
     """
-
+    
     if batch_size is None:
         batch_size = 10
 
