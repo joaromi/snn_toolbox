@@ -39,6 +39,7 @@ from abc import abstractmethod
 
 from tensorflow import keras
 import numpy as np
+import snntoolbox.simulation.backends.custom_layers as custom_layers
 
 IS_CHANNELS_FIRST = keras.backend.image_data_format() == 'channels_first'
 
@@ -173,39 +174,14 @@ class AbstractModelParser:
                 inserted_flatten = True
 
             if layer_type == 'Add':
-                print("Replacing Add layer by Concatenate plus Conv.")
-                shape = layer.output_shape
-                if IS_CHANNELS_FIRST:
-                    axis = 1
-                    c, h, w = shape[1:]
-                    shape_str = '{}x{}x{}'.format(2 * c, h, w)
-                else:
-                    axis = -1
-                    h, w, c = shape[1:]
-                    shape_str = '{}x{}x{}'.format(h, w, 2 * c)
-                _layer_type = 'Concatenate'
+                print("Replacing Add layer by Normalizable_Add.")
+               # _layer_type = 'Normalizable_Add'
                 num_str = self.format_layer_idx(idx)
                 self._layer_list.append({
-                    'layer_type': _layer_type,
-                    'name': num_str + _layer_type + '_' + shape_str,
+                    'layer_type': 'Normalizable_Add',
+                    'name': self.get_name(layer, idx),
                     'inbound': self.get_inbound_names(layer, name_map),
-                    'axis': axis})
-                name_map[_layer_type + str(idx)] = idx
-                idx += 1
-                _layer_type = 'Conv2D'
-                num_str = self.format_layer_idx(idx)
-                shape_str = '{}x{}x{}'.format(*shape[1:])
-                weights = np.zeros([1, 1, 2 * c, c])
-                for k in range(c):
-                    weights[:, :, k::c, k] = 1
-                self._layer_list.append({
-                    'name': num_str + _layer_type + '_' + shape_str,
-                    'layer_type': _layer_type,
-                    'inbound': [self._layer_list[-1]['name']],
-                    'filters': c,
-                    'activation': act_pred,
-                    'parameters': (weights, np.zeros(c)),
-                    'kernel_size': 1})
+                    })
                 name_map[str(id(layer))] = idx
 
                 if is_output:
@@ -213,8 +189,8 @@ class AbstractModelParser:
                     for i,out_layer in enumerate(out_layers):
                         if layer==out_layer:
                             out_links[i]=idx
-
                 idx += 1
+                continue
 
             if layer_type=='Activation':
                 activation_str = self.get_activation(layer)
@@ -1129,6 +1105,8 @@ class AbstractModelParser:
             layer_type = layer.pop('layer_type')
             if hasattr(keras.layers, layer_type):
                 parsed_layer = getattr(keras.layers, layer_type)
+            elif hasattr(custom_layers, layer_type):
+                parsed_layer = getattr(custom_layers, layer_type)
             else:
                 import keras_rewiring
                 parsed_layer = getattr(keras_rewiring.sparse_layer, layer_type)
