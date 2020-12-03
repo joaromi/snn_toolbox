@@ -646,7 +646,7 @@ def layer_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, fr
                 (parameters[1]-shift)/(lmbda-shift)
                 ]
         elif len(inbound) == 1:
-            ws = np.sum(parameters[0],(0,1,2))*scale_facs[inbound[0].name][0]
+            ws = np.sum(parameters[0],(0,1,2))*scale_facs[inbound[0].name][1]
             parameters_norm = [
                 parameters[0] * (scale_facs[inbound[0].name][0]-scale_facs[inbound[0].name][1])/(lmbda-shift),
                 (parameters[1]+ws-shift)/(lmbda-shift)
@@ -663,7 +663,7 @@ def layer_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, fr
                 f_out = inb.filters  # Num output features of inbound layer
                 f_in = range(offset, offset + f_out)
                 parameters_norm[0][:,:,f_in] *= (scale_facs[inb.name][0]-scale_facs[inb.name][1])/(lmbda-shift)
-                ws += np.sum(parameters[0][:,:,f_in],(0,1,2))*scale_facs[inb.name][0]
+                ws += np.sum(parameters[0][:,:,f_in],(0,1,2))*scale_facs[inb.name][1]
                 offset += f_out
             parameters_norm[1] = (parameters[1]+np.array(ws).flatten()-shift)/(lmbda-shift)
 
