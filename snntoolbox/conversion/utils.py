@@ -659,13 +659,13 @@ def layer_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, fr
             # In conv layers, just need to split up along channel dim.
             offset = 0  # Index offset at input filter dimension
             ws = np.zeros(parameters[1].shape)
-            for inb in inbound:
+            for i,inb in enumerate(inbound):
                 f_out = inb.filters  # Num output features of inbound layer
                 f_in = range(offset, offset + f_out)
                 parameters_norm[0][:,:,f_in] *= (scale_facs[inb.name][0]-scale_facs[inb.name][1])/(lmbda-shift)
-                ws += np.sum(parameters[0][:,:,f_in],(0,1,2))*scale_facs[inb.name][1]
+                parameters_norm[i+2] = scale_facs[inb.name][1]
                 offset += f_out
-            parameters_norm[1] = (parameters[1]+np.array(ws).flatten()-shift)/(lmbda-shift)
+            parameters_norm[1] = (parameters[1]-shift)/(lmbda-shift)
 
         # Check if the layer happens to be Sparse
         # if the layer is sparse, add the mask to the list of parameters
