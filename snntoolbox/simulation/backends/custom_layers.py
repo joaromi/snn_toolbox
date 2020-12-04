@@ -55,3 +55,53 @@ class Normalizable_Add(Layer):
             'activation': self.activation
         })
         return config
+
+
+class Decode_Reshape(Layer):
+    
+     def __init__(self, target_shape, **kwargs):
+          self.target_shape = target_shape
+          self.resh = keras.layers.Reshape(self.target_shape, **kwargs)
+          #self.built = False
+          super(Decode_Reshape, self).__init__(**kwargs) 
+
+     def build(self, input_shape): 
+          self.in_channels = input_shape[-1]
+
+          self.lmbda = self.add_weight(
+                         shape = (self.in_channels,), 
+                         initializer = "ones", trainable = False
+                         )
+          self.shift = self.add_weight(
+                         shape = (self.in_channels,), 
+                         initializer = "zeros", trainable = False
+                         )
+          super(Decode_Reshape, self).build(input_shape)
+          #self.built = True
+
+     def call(self, input_data):
+          #if not self.built: self.build(tf.shape(input_data))
+          out = input_data*(self.lmbda-self.shift)+self.shift   
+          out = self.resh(out)
+          return out
+
+     # def compute_output_shape(self, input_shape): 
+     #      return input_shape[0] + (self.filters,)
+
+     def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            'target_shape': self.target_shape
+        })
+        return config
+
+     def get_weights(self):
+          return [self.lmbda, self.shift]
+     
+     def set_weights(self, weights):
+          try:
+               self.lmbda = weights[0]
+               self.shift = weights[1]
+          except ValueError:
+               print('Weights need to be of shape: [',tf.shape(self.lmbda),',',tf.shape(self.shift),'].')
+
