@@ -94,6 +94,9 @@ class SNN(AbstractSNN):
     def build_convolution(self, layer):
         pass
 
+    def build_NormAdd(self,layer):
+        pass
+
     def build_pooling(self, layer):
         pass
 

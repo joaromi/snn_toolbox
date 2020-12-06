@@ -135,7 +135,7 @@ spiking_layers = {'Dense', 'Conv1D', 'Conv2D', 'DepthwiseConv2D', 'MaxPooling2D'
                   'SparseDepthwiseConv2D'}
 # Layers that can be implemented by our spiking neuron simulators:
 snn_layers = %(spiking_layers)s | {'Reshape', 'Flatten', 'Concatenate',
-                                   'ZeroPadding2D' , 'UpSampling2D', 'Decode_Reshape'}
+                                   'ZeroPadding2D' , 'UpSampling2D', 'NormReshape'}
 cellparams_pyNN = {'v_thresh', 'v_reset', 'v_rest', 'cm', 'tau_refrac',
                    'tau_m', 'tau_syn_E', 'tau_syn_I'}
 

@@ -631,7 +631,7 @@ def layer_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, fr
 
     # Apply scale factors to normalize the parameters.
     for layer in model.layers:
-        if layer.__class__.__name__ == 'Decode_Reshape':
+        if layer.__class__.__name__ == 'NormReshape':
             inbound = get_inbound_layers_with_params(layer)
             weights = layer.get_weights()
             layer.set_weights([

@@ -14,6 +14,7 @@ simulation duration.
 import os
 
 import json
+import numpy as np
 
 import tensorflow as tf
 from tensorflow.keras.layers import Dense, Flatten, AveragePooling2D, \
@@ -21,6 +22,7 @@ from tensorflow.keras.layers import Dense, Flatten, AveragePooling2D, \
     Concatenate
 
 from snntoolbox.parsing.utils import get_inbound_layers
+from snntoolbox.simulation.backends.custom_layers import NormReshape, NormAdd
 
 # Experimental
 clamp_var = False
@@ -644,6 +646,33 @@ class SpikeReshape(Reshape):
         return self.__class__.__name__
 
 
+class SpikeNormReshape(NormReshape):
+    """Spike Reshape layer."""
+
+    def __init__(self, **kwargs):
+        kwargs.pop(str('config'))
+        NormReshape.__init__(self, **kwargs)
+
+    def call(self, x, mask=None):
+
+        return NormReshape.call(self, x)
+
+    @staticmethod
+    def get_time():
+        pass
+
+    @staticmethod
+    def reset(sample_idx):
+        """Reset layer variables."""
+        pass
+
+    @property
+    def class_name(self):
+        """Get class name."""
+        return self.__class__.__name__
+
+
+
 class SpikeDense(Dense, SpikeLayer):
     """Spike Dense layer."""
 
@@ -775,7 +804,103 @@ class SpikeMaxPooling2D(MaxPooling2D, SpikeLayer):
         return tf.nn.avg_pool2d(x, self.pool_size, self.strides, self.padding)
 
 
-custom_layers = {'SpikeFlatten': SpikeFlatten,
+class SpikeNormAdd(Layer):
+    
+    def __init__(self, activation=None, **kwargs):      
+        self._initial_weights = kwargs.pop('weights', None)
+        self.kwargs = kwargs.copy()
+        kwargs.pop(str('config'))
+        super(SpikeNormAdd, self).__init__(**kwargs) 
+
+    def build(self, input_shape): 
+        super(SpikeNormAdd, self).build(input_shape)
+        n = len(input_shape)
+        self.filters = input_shape[0][-1]
+
+        # Weights
+        if self._initial_weights is not None:
+            weights_conv = self._initial_weights[:2]
+            self.b = self._initial_weights[2:]    
+            self._initial_weights = None        
+        else: 
+            self.b = [None]*n
+            for i in range(len(self.b)):
+                self.b[i] = self.add_weight(
+                                name="unshift"+str(i),
+                                shape = (self.filters,), 
+                                initializer = "zeros", trainable = True
+                                )
+            weights_conv = (
+                np.zeros([1, 1, n*self.filters, self.filters]),
+                np.zeros(self.filters)
+            )
+            for k in range(self.filters):
+                weights_conv[0][:, :, k::self.filters, k] = 1
+        
+        # Convolution layer
+        self.conv = SpikeConv2D(
+                filters=self.filters,
+                kernel_size=1, 
+                weights=weights_conv,
+                **self.kwargs
+                ) 
+
+        conv_in_shape = tf.TensorShape(np.array(input_shape[0])*[1,1,1,n])
+        self.conv.build(conv_in_shape)
+        self.conv.data_format = 'channels_last'
+
+    def call(self, input_data):
+        tensor = [None]*len(self.b)
+        for i,image in enumerate(input_data):
+            tensor[i] = image+self.b[i]
+            
+        out = tf.concat(tensor, axis=-1)
+        out = self.conv.call(out)
+        return out
+
+    def compute_output_shape(self, input_shape): 
+        return input_shape[0] + (self.filters,)
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config['weights'] = self.get_weights()
+        config.update({
+            'activation': None,
+            'filters': self.filters
+        })
+        return config
+
+    def set_weights(self, weights):
+        conv_weights = self.conv.get_weights()
+        if len(weights) == 2:
+            conv_weights[:2] = weights
+            print('-- Basic Conv2D weights set.')
+        elif len(weights) == 2 + len(self.b):
+            conv_weights[:2] = weights[:2]
+            self.b = weights[2:]
+            print('-- Basic Conv2D weights and input biases set.')
+        elif len(weights) == len(conv_weights) + len(self.b):
+            conv_weights = weights[:len(conv_weights)]
+            self.b = weights[len(conv_weights):]
+            print('-- SpikeConv2D weights and input biases set.')
+        elif len(weights) == len(conv_weights):
+            conv_weights = weights
+            print('-- SpikeConv2D weights set.')
+        else:
+            print('(!!!) The weights provided do not match the layer shape. \n \
+                - SpikeConv2D accepts list of either length 2 or 5. \n \
+                - Input biases accept list of length',len(self.b),'.\n \
+                (Always write [SpikeConv2D weights , input biases])')
+                
+        self.conv.set_weights(conv_weights)
+
+    def get_weights(self):
+        return self.conv.get_weights()+self.b 
+
+
+
+custom_layers = {
+                'SpikeFlatten': SpikeFlatten,
                  'SpikeReshape': SpikeReshape,
                  'SpikeZeroPadding2D': SpikeZeroPadding2D,
                  'SpikeDense': SpikeDense,
@@ -783,4 +908,8 @@ custom_layers = {'SpikeFlatten': SpikeFlatten,
                  'SpikeDepthwiseConv2D': SpikeDepthwiseConv2D,
                  'SpikeAveragePooling2D': SpikeAveragePooling2D,
                  'SpikeMaxPooling2D': SpikeMaxPooling2D,
-                 'SpikeConcatenate': SpikeConcatenate}
+                 'SpikeConcatenate': SpikeConcatenate,
+                 'SpikeUpsampling2D': SpikeUpSampling2D,
+                 'SpikeNormReshape': SpikeNormReshape,
+                 'SpikeNormAdd': SpikeNormAdd
+                 }

@@ -250,6 +250,19 @@ class AbstractSNN:
         pass
 
     @abstractmethod
+    def build_NormAdd(self, layer):
+        """Build spiking convolutional layer.
+
+        Parameters
+        ----------
+
+        layer: keras.layers.Layer
+            Layer
+        """
+
+        pass
+
+    @abstractmethod
     def build_pooling(self, layer):
         """Build spiking pooling layer.
 
@@ -833,6 +846,8 @@ class AbstractSNN:
                 self.build_pooling(layer)
             elif layer_type == 'Flatten':
                 self.build_flatten(layer)
+            # elif layer_type == 'NormAdd':
+            #     self.build_NormAdd(layer)
 
     def adjust_batchsize(self):
         """Reduce batch size to single sample if necessary.
@@ -1839,9 +1854,8 @@ def remove_name_counter(name_in):
         return name_in
 
     split_dash = str(name_in).split('/')
-    assert len(split_dash) == 2, "Variable name must not contain '/'."
+    #assert len(split_dash) == 2, "Variable name must not contain '/'."
     # We are only interested in the part before the /.
     split_underscore = split_dash[0].split('_')
     # The first '_' is assigned by SNN toolbox and should be kept.
-    return (split_underscore[0] + '_' + split_underscore[1] + '/' +
-            split_dash[1])
+    return (split_underscore[0] + '_' + split_underscore[1] + '/' + split_dash[-1])

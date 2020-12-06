@@ -174,11 +174,11 @@ class AbstractModelParser:
                 inserted_flatten = True
 
             if layer_type == 'Add':
-                print("Replacing Add layer by Normalizable_Add.")
+                print("Replacing Add layer by NormAdd.")
                # _layer_type = 'Normalizable_Add'
                 num_str = self.format_layer_idx(idx)
                 self._layer_list.append({
-                    'layer_type': 'Normalizable_Add',
+                    'layer_type': 'NormAdd',
                     'name': self.get_name(layer, idx),
                     'inbound': self.get_inbound_names(layer, name_map),
                     })
