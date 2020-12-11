@@ -114,18 +114,24 @@ class SNN(AbstractSNN):
 
         parameter_map = {remove_name_counter(p.name): v for p, v in
                          zip(self.parsed_model.weights,
-                             self.parsed_model.get_weights())}
+                             self.parsed_model.get_weights()) if p.name[0].isnumeric()}
         count = 0
         for p in self.snn.weights:
             name = remove_name_counter(p.name)
             if name in parameter_map:
                 keras.backend.set_value(p, parameter_map[name])
                 count += 1
-        assert count == len(parameter_map), "Not all weights have been " \
+        assert count > len(parameter_map), "Not all weights have been " \
                                             "transferred from ANN to SNN."
 
         for layer in self.snn.layers:
-            if hasattr(layer, 'bias'):
+            if layer.__class__.__name__ == 'SpikeNormAdd':
+                weights = self.parsed_model.get_layer(layer.name).get_weights()
+                weights[1:] = [ arr*self._dt for arr in weights[1:] ]
+                layer.set_weights(weights)
+            elif layer.__class__.__name__ == 'SpikeNormReshape':
+                layer.set_dt(self._dt)
+            elif hasattr(layer, 'bias'):
                 # Adjust biases to time resolution of simulator.
                 bias = keras.backend.get_value(layer.bias) * self._dt
                 keras.backend.set_value(layer.bias, bias)
@@ -190,27 +196,24 @@ class SNN(AbstractSNN):
         output_b_l_t = output_b_l_t[:, :detected, :, :]
         return np.cumsum(output_b_l_t, -1)
 
-    def simulate_RNet_light(self, x=None, y=None, num_detections=200000):
+    def simulate_RNet_light(self, x=None, y=None):
         from snntoolbox.utils.utils import echo
         from snntoolbox.simulation.utils import get_layer_synaptic_operations
 
+        num_detections = self.parsed_model.output_shape[-2]
         input_b_l = x * self._dt
         num_timesteps = self._get_timestep_at_spikecount(input_b_l)
         output_b_l_t = np.zeros((self.batch_size, num_detections, 4+self.num_classes))
 
-        detected = 0
         self._input_spikecount = 0
         for sim_step_int in range(num_timesteps):
             sim_step = (sim_step_int + 1) * self._dt
             self.set_time(sim_step)
 
             out_spikes = self.snn.predict_on_batch(input_b_l)
-            detected = max(detected, out_spikes.shape[-2])
+            output_b_l_t += out_spikes[0] > 0
 
-            output_b_l_t[:, :out_spikes.shape[-2], :] += out_spikes[0] > 0
-
-        output_b_l_t = output_b_l_t[:, :detected, :]
-        return np.cumsum(output_b_l_t, -1)
+        return output_b_l_t / self.config.getfloat('simulation', 'duration')
 
             
 

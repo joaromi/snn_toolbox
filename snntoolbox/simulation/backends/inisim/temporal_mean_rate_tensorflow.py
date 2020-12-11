@@ -646,32 +646,6 @@ class SpikeReshape(Reshape):
         return self.__class__.__name__
 
 
-class SpikeNormReshape(NormReshape):
-    """Spike Reshape layer."""
-
-    def __init__(self, **kwargs):
-        kwargs.pop(str('config'))
-        NormReshape.__init__(self, **kwargs)
-
-    def call(self, x, mask=None):
-
-        return NormReshape.call(self, x)
-
-    @staticmethod
-    def get_time():
-        pass
-
-    @staticmethod
-    def reset(sample_idx):
-        """Reset layer variables."""
-        pass
-
-    @property
-    def class_name(self):
-        """Get class name."""
-        return self.__class__.__name__
-
-
 
 class SpikeDense(Dense, SpikeLayer):
     """Spike Dense layer."""
@@ -828,7 +802,8 @@ class SpikeNormAdd(Layer):
                 self.b[i] = self.add_weight(
                                 name="unshift"+str(i),
                                 shape = (self.filters,), 
-                                initializer = "zeros", trainable = True
+                                initializer = "zeros", 
+                                trainable = True
                                 )
             weights_conv = (
                 np.zeros([1, 1, n*self.filters, self.filters]),
@@ -843,7 +818,8 @@ class SpikeNormAdd(Layer):
                 kernel_size=1, 
                 weights=weights_conv,
                 **self.kwargs
-                ) 
+                )
+        del self.kwargs 
 
         conv_in_shape = tf.TensorShape(np.array(input_shape[0])*[1,1,1,n])
         self.conv.build(conv_in_shape)
@@ -874,20 +850,20 @@ class SpikeNormAdd(Layer):
         conv_weights = self.conv.get_weights()
         if len(weights) == 2:
             conv_weights[:2] = weights
-            print('-- Basic Conv2D weights set.')
+            print('--',self.name,' - Basic Conv2D weights set.')
         elif len(weights) == 2 + len(self.b):
             conv_weights[:2] = weights[:2]
             self.b = weights[2:]
-            print('-- Basic Conv2D weights and input biases set.')
+            print('--',self.name,' - Basic Conv2D weights and input biases set.')
         elif len(weights) == len(conv_weights) + len(self.b):
             conv_weights = weights[:len(conv_weights)]
             self.b = weights[len(conv_weights):]
-            print('-- SpikeConv2D weights and input biases set.')
+            print('--',self.name,' - SpikeConv2D weights and input biases set.')
         elif len(weights) == len(conv_weights):
             conv_weights = weights
-            print('-- SpikeConv2D weights set.')
+            print('--',self.name,' - SpikeConv2D weights set.')
         else:
-            print('(!!!) The weights provided do not match the layer shape. \n \
+            print('<!!! - ',self.name,'> The weights provided do not match the layer shape. \n \
                 - SpikeConv2D accepts list of either length 2 or 5. \n \
                 - Input biases accept list of length',len(self.b),'.\n \
                 (Always write [SpikeConv2D weights , input biases])')
@@ -895,8 +871,62 @@ class SpikeNormAdd(Layer):
         self.conv.set_weights(conv_weights)
 
     def get_weights(self):
-        return self.conv.get_weights()+self.b 
+        return self.conv.get_weights()[:2]+self.b 
 
+    def get_time(self):
+        return self.conv.time.eval
+
+    def set_time(self, time):
+        self.conv.time.assign(time)
+
+    def reset(self, sample_idx):
+        self.conv.reset_spikevars(tf.constant(sample_idx))
+
+    @property
+    def class_name(self):
+        """Get class name."""
+        return self.__class__.__name__
+
+
+class SpikeNormReshape(NormReshape):
+    """Spike Reshape layer."""
+
+    def __init__(self, **kwargs):
+        kwargs.pop(str('config'))
+        NormReshape.__init__(self, **kwargs)
+        self.dt = 1
+
+    def build(self, input_shape):
+        super(SpikeNormReshape, self).build(input_shape)
+        self.accum = self.add_weight(
+                        name="accumulator",
+                        shape = input_shape, 
+                        initializer = "zeros", trainable = False
+        )
+
+    def call(self, x, mask=None):
+        x = x + self.accum
+        out = x*(self.lmbda-self.shift)+(self.shift)   
+        out = self.resh(out)
+        self.accum = x
+        return out
+
+    @staticmethod
+    def get_time():
+        pass
+
+    @staticmethod
+    def reset(self, sample_idx):
+        """Reset layer variables."""
+        self.accum += -self.accum
+
+    @property
+    def class_name(self):
+        """Get class name."""
+        return self.__class__.__name__
+
+    def set_dt(self, t):
+        self.dt = t
 
 
 custom_layers = {

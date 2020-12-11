@@ -1857,5 +1857,9 @@ def remove_name_counter(name_in):
     #assert len(split_dash) == 2, "Variable name must not contain '/'."
     # We are only interested in the part before the /.
     split_underscore = split_dash[0].split('_')
+    if len(split_underscore)>1: 
+        after_ = '_' + split_underscore[1]
+    else:
+        after_=''
     # The first '_' is assigned by SNN toolbox and should be kept.
-    return (split_underscore[0] + '_' + split_underscore[1] + '/' + split_dash[-1])
+    return (split_underscore[0] + after_ + '/' + split_dash[-1])
