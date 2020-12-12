@@ -893,9 +893,11 @@ def channel_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, 
             continue
 
         # Scale parameters
-        parameters = [np.array(w, dtype='float64') for w in layer.get_weights()]
-        lbdas = np.array(scale_facs[layer.name][0], dtype='float64')
-        shifts = np.array(scale_facs[layer.name][1], dtype='float64')
+        parameters = [np.array(w, dtype='float32') for w in layer.get_weights()]
+        lbdas = np.array(scale_facs[layer.name][0], dtype='float32')
+        shifts = np.array(scale_facs[layer.name][1], dtype='float32')
+        #denom = lbdas-shifts
+        denom = np.array([aux if aux!=0 else 1 for aux in [l-s for l,s in zip(lbdas,shifts)]], dtype='float64')
         inbound = get_inbound_layers_with_params(layer)
 
         in_ch = parameters[0].shape[-2]
@@ -903,33 +905,36 @@ def channel_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, 
 
         if len(inbound) == 0:  # Input layer
             parameters_norm = [
-                parameters[0]/(lbdas-shifts),
-                (parameters[1]-shifts)/(lbdas-shifts)
+                parameters[0]/denom,
+                (parameters[1]-shifts)/denom
                 ]
         elif len(inbound) == 1:
-            lbdas0  = np.array(scale_facs[inbound[0].name][0], dtype='float64')
-            shifts0 = np.array(scale_facs[inbound[0].name][1], dtype='float64')
-
-            ws = np.sum(np.transpose(np.sum(parameters[0],(0,1)))*shifts0,(1))
-            parameters_norm = [parameters[0], (parameters[1]+ws-shifts)/(lbdas-shifts)]
-            #ws = np.zeros(out_ch)
-            for i in range(in_ch):
-                parameters_norm[0][:,:,i] *= (lbdas0[i]-shifts0[i])/(lbdas-shifts)
+            lbdas0  = np.array(scale_facs[inbound[0].name][0], dtype='float32')
+            shifts0 = np.array(scale_facs[inbound[0].name][1], dtype='float32')
+            parameters_norm = parameters.copy()
+            for i in range(len(lbdas0)):
+                den0 = (lbdas0[i]-shifts0[i])
+                den0 = den0 if den0!=0 else 1
+                parameters_norm[1] += np.sum(parameters[0][:,:,i],(0,1))*shifts0[i]
+                parameters_norm[0][:,:,i] = parameters[0][:,:,i]*den0/denom
+            parameters_norm[1] = (parameters_norm[1]-shifts)/denom
 
         else:
-            parameters_norm = parameters
+            parameters_norm = parameters.copy()
             offset = 0  # Index offset at input filter dimension
             for i,inb in enumerate(inbound):
-                lbdas0  = np.array(scale_facs[inb.name][0], dtype='float64')
-                shifts0 = np.array(scale_facs[inb.name][1], dtype='float64')
-                f_out = inb.filters  # Num output features of inbound layer
+                lbdas0  = np.array(scale_facs[inb.name][0], dtype='float32')
+                shifts0 = np.array(scale_facs[inb.name][1], dtype='float32')
+                f_out = len(lbdas0)  # Num output features of inbound layer
                 unshift = np.zeros(f_out)
                 for j in range(f_out):
-                    parameters_norm[0][:,:,j+offset] *= (lbdas0[j]-shifts0[j])/(lbdas-shifts)
-                    unshift[j] = np.array(parameters_norm[i+2][j]) + shifts0[j]/(lbdas0[j]-shifts0[j])
+                    den0 = (lbdas0[j]-shifts0[j])
+                    den0 = den0 if den0!=0 else 1
+                    parameters_norm[0][:,:,j+offset] *= den0/denom
+                    unshift[j] = parameters_norm[i+2][j] + shifts0[j]/den0
                 parameters_norm[i+2] = unshift
                 offset += f_out
-            parameters_norm[1] = (parameters[1]-shifts)/(lbdas-shifts)
+            parameters_norm[1] = (parameters[1]-shifts)/denom
 
         # Check if the layer happens to be Sparse
         # if the layer is sparse, add the mask to the list of parameters
@@ -1534,22 +1539,11 @@ def get_scale_fac_channel(activations, percentile):
         Parameters of the respective layer are scaled by this value.
     """
 
-    num_channels = activations.shape[-1]
-    scale_facs = np.zeros(num_channels)
-
-    for j in range(num_channels):
-        scale_facs[j] = np.percentile(activations[:,:,:,j], percentile)
-
-    return scale_facs
+    return np.percentile(activations, percentile, axis=(0,1,2))
 
 def get_shift_channel(activations):
-    num_channels = activations.shape[-1]
-    shifts = np.zeros(num_channels)
 
-    for j in range(num_channels):
-        shifts[j] = np.amin(activations[:,:,:,j])
-
-    return shifts
+    return np.minimum(0, np.amin(activations, axis=(0,1,2)))
 
 
 def get_percentile(config, layer_idx=None):
