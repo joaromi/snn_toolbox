@@ -1850,7 +1850,7 @@ def remove_name_counter(name_in):
     00DepthwiseConv2D_3X32x32_0/depthwise_kernel:0.
     """
 
-    if '_' not in name_in or '/' not in name_in:
+    if '_' not in name_in and '/' not in name_in:
         return name_in
 
     split_dash = str(name_in).split('/')

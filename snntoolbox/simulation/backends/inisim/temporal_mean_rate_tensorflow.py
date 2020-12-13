@@ -22,7 +22,7 @@ from tensorflow.keras.layers import Dense, Flatten, AveragePooling2D, \
     Concatenate
 
 from snntoolbox.parsing.utils import get_inbound_layers
-from snntoolbox.simulation.backends.custom_layers import NormReshape, NormAdd
+from snntoolbox.simulation.backends.custom_layers import NormReshape, NormAdd, NormConv2D
 
 # Experimental
 clamp_var = False
@@ -927,6 +927,22 @@ class SpikeNormReshape(NormReshape):
 
     def set_dt(self, t):
         self.dt = t
+
+
+class SpikeNormConv2D(NormConv2D, SpikeLayer):
+    """Spike Normalized 2D Convolution."""
+
+    def build(self, input_shape):
+
+        NormConv2D.build(self, input_shape)
+        self.init_neurons(input_shape.as_list())
+
+        if self.config.getboolean('cell', 'bias_relaxation'):
+            self.update_b()
+
+    @spike_call
+    def call(self, x, mask=None):
+        return NormConv2D.call(self, x)
 
 
 custom_layers = {

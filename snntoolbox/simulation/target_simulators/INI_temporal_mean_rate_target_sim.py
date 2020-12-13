@@ -115,13 +115,17 @@ class SNN(AbstractSNN):
         parameter_map = {remove_name_counter(p.name): v for p, v in
                          zip(self.parsed_model.weights,
                              self.parsed_model.get_weights()) if p.name[0].isnumeric()}
+        
+        parameter_map_SNN = {remove_name_counter(p.name): v for p, v in
+                         zip(self.snn.weights,
+                             self.snn.get_weights()) if p.name[0].isnumeric()}
         count = 0
         for p in self.snn.weights:
             name = remove_name_counter(p.name)
             if name in parameter_map:
                 keras.backend.set_value(p, parameter_map[name])
                 count += 1
-        assert count > len(parameter_map), "Not all weights have been " \
+        assert count == len(parameter_map), "Not all weights have been " \
                                             "transferred from ANN to SNN."
 
         for layer in self.snn.layers:
@@ -131,13 +135,17 @@ class SNN(AbstractSNN):
                 layer.set_weights(weights)
             elif layer.__class__.__name__ == 'SpikeNormReshape':
                 layer.set_dt(self._dt)
-            elif hasattr(layer, 'bias'):
-                # Adjust biases to time resolution of simulator.
-                bias = keras.backend.get_value(layer.bias) * self._dt
-                keras.backend.set_value(layer.bias, bias)
-                if self.config.getboolean('cell', 'bias_relaxation'):
-                    keras.backend.set_value(
-                        layer.b0, keras.backend.get_value(layer.bias))
+            else:
+                if hasattr(layer, 'shift'):
+                    shift = keras.backend.get_value(layer.shift) * self._dt
+                    keras.backend.set_value(layer.shift, shift)
+                if hasattr(layer, 'bias'):
+                    # Adjust biases to time resolution of simulator.
+                    bias = keras.backend.get_value(layer.bias) * self._dt
+                    keras.backend.set_value(layer.bias, bias)
+                    if self.config.getboolean('cell', 'bias_relaxation'):
+                        keras.backend.set_value(
+                            layer.b0, keras.backend.get_value(layer.bias))
 
     def compile(self):
 

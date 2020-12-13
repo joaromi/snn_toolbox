@@ -101,6 +101,7 @@ class AbstractModelParser:
         snn_layers = eval(self.config.get('restrictions', 'snn_layers'))
         for k_,layer in enumerate(layers):
             layer_type = self.get_type(layer)
+            transform_Conv = self.config.getboolean('input', 'norm_conv')
 
             is_output = layer in out_layers
 
@@ -176,7 +177,6 @@ class AbstractModelParser:
             if layer_type == 'Add':
                 print("Replacing Add layer by NormAdd.")
                # _layer_type = 'Normalizable_Add'
-                num_str = self.format_layer_idx(idx)
                 self._layer_list.append({
                     'layer_type': 'NormAdd',
                     'name': self.get_name(layer, idx),
@@ -224,7 +224,7 @@ class AbstractModelParser:
                     for k in range(c):
                         weights[:, :, k, k] = 1
                     self._layer_list.append({
-                        'name': num_str + 'ACTIV_' + _layer_type + '_' + shape_str,
+                        'name': num_str + 'ACTIV_' + _layer_type,# + '_' + shape_str,
                         'layer_type': _layer_type,
                         'inbound': [self._layer_list[-1]['name']],
                         'filters': c,
@@ -240,40 +240,29 @@ class AbstractModelParser:
                 print("Skipping layer {}.".format(layer_type))
                 continue
 
-            # if not inserted_flatten:
-            #     inserted_flatten = self.try_insert_flatten(layer, idx,
-            #                                                name_map)
-            #     idx += inserted_flatten
-
             print("Parsing layer {}.".format(layer_type))
 
             if layer_type == 'MaxPooling2D' and \
                     self.config.getboolean('conversion', 'max2avg_pool'):
                 print("Replacing max by average pooling.")
                 layer_type = 'AveragePooling2D'
-
-            # If we inserted a layer, need to set the right inbound layer here.
-            if inserted_flatten:
-                inbound = [self._layer_list[-1]['name']]
-                inserted_flatten = False
-            else:
-
-                ###################################################################
-                ###################################################################
-
-                if prev_out_idx is None or layer not in in_layers:
-                    if need_rewire:
-                        inbound = [self._layer_list[-1]['name']]
-                    else:
-                        inbound = self.get_inbound_names(layer, name_map)
+           
+            if prev_out_idx is None or layer not in in_layers:
+                if need_rewire:
+                    inbound = [self._layer_list[-1]['name']]
                 else:
-                    inbound = []
-                    for j,in_layer in enumerate(in_layers):
-                        if layer==in_layer:
-                            inbound.append(self._layer_list[prev_out_idx[j]]['name'])
-                    
+                    inbound = self.get_inbound_names(layer, name_map)
+            else:
+                inbound = []
+                for j,in_layer in enumerate(in_layers):
+                    if layer==in_layer:
+                        inbound.append(self._layer_list[prev_out_idx[j]]['name'])
 
             attributes = self.initialize_attributes(layer)
+            if layer_type == 'Conv2D' and transform_Conv:
+                print("Replacing Conv2D layer by NormConv2D.")
+                layer_type = 'NormConv2D'
+                attributes.update({'parameters': list(layer.get_weights())})                  
 
             attributes.update({'layer_type': layer_type,
                                'name': self.get_name(layer, idx),
@@ -778,18 +767,18 @@ class AbstractModelParser:
         if layer_type is None:
             layer_type = self.get_type(layer)
 
-        try:
-            output_shape = self.get_output_shape(layer)
-            shape_string = ["{}x".format(x) for x in output_shape[1:]]
-            shape_string[0] = "_" + shape_string[0]
-            shape_string[-1] = shape_string[-1][:-1]
-            shape_string = "".join(shape_string)
-        except:
-            shape_string = "MULT"
+        # try:
+        #     output_shape = self.get_output_shape(layer)
+        #     shape_string = ["{}x".format(x) for x in output_shape[1:]]
+        #     shape_string[0] = "_" + shape_string[0]
+        #     shape_string[-1] = shape_string[-1][:-1]
+        #     shape_string = "".join(shape_string)
+        # except:
+        #     shape_string = "MULT"
 
         num_str = self.format_layer_idx(idx)
 
-        return num_str + layer_type + shape_string
+        return num_str + layer_type #+ shape_string
 
     def format_layer_idx(self, idx):
         """Pad the layer index with the appropriate amount of zeros.

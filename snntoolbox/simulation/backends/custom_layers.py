@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 import keras
 from keras import backend as K
-from keras.layers import Layer
+from keras.layers import Layer, Conv2D
 from tensorflow.python.keras import activations
 
 class NormAdd(Layer):
@@ -145,3 +145,49 @@ class NormReshape(Layer):
           except ValueError:
                print('Weights need to be of shape: [',tf.shape(self.lmbda),',',tf.shape(self.shift),'].')
 
+
+class NormConv2D(Conv2D):
+     def __init__(self, **kwargs):
+          self.initial_weights=kwargs.pop('weights', None)               
+          super(NormConv2D, self).__init__(**kwargs) 
+
+     def build(self, input_shape):
+          super(NormConv2D, self).build(input_shape)
+          # Normalization
+          self.norm = [self.add_weight(
+                         name="denom",
+                         shape = (input_shape[-1],),
+                         initializer = "ones", trainable = False
+                         ),
+                    self.add_weight(
+                         name="shift",
+                         shape = (input_shape[-1],),
+                         initializer = "zeros", trainable = False
+                         )
+               ]
+          if self.initial_weights is not None:
+               self.set_weights(self.initial_weights)
+               self._initial_weights = self.initial_weights
+               del self.initial_weights
+
+     def call(self, x):
+          x = x*self.norm[0] + self.norm[1]
+          return Conv2D.call(self, x)
+
+     def set_weights(self,weights):
+          if len(weights)==4:
+               w = [tf.convert_to_tensor(u) for u in weights]
+               super().set_weights(w)
+          elif len(weights)==2:
+               extra = tf.convert_to_tensor(self.norm)
+               super().set_weights(list(weights)+[extra[0]]+[extra[1]])
+          else:
+               raise ValueError(
+               'You called `set_weights(weights)` on layer "%s" '
+               'with a weight list of length %s, but the layer was '
+               'expecting 4 weights. Provided weights: %s...' %
+               (self.name, len(weights), str(weights)[:50]))
+
+     def get_weights(self):
+          extra = tf.convert_to_tensor(self.norm)
+          return [self.kernel, self.bias, extra[0], extra[1]]
