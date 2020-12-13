@@ -128,20 +128,24 @@ class SNN(AbstractSNN):
         assert count == len(parameter_map), "Not all weights have been " \
                                             "transferred from ANN to SNN."
 
+        factor = self._dt
         for layer in self.snn.layers:
             if layer.__class__.__name__ == 'SpikeNormAdd':
+                print("Adapting shifts of "+layer.name)
                 weights = self.parsed_model.get_layer(layer.name).get_weights()
-                weights[1:] = [ arr*self._dt for arr in weights[1:] ]
+                weights[1:] = [ arr*factor for arr in weights[1:] ]
                 layer.set_weights(weights)
             elif layer.__class__.__name__ == 'SpikeNormReshape':
-                layer.set_dt(self._dt)
+                layer.set_dt(factor)
             else:
-                if hasattr(layer, 'shift'):
-                    shift = keras.backend.get_value(layer.shift) * self._dt
-                    keras.backend.set_value(layer.shift, shift)
+                if hasattr(layer, 'norm'):
+                    print("Adapting shift of "+layer.name)
+                    shift = keras.backend.get_value(layer.norm[1]) * factor
+                    keras.backend.set_value(layer.norm[1], shift)
                 if hasattr(layer, 'bias'):
                     # Adjust biases to time resolution of simulator.
-                    bias = keras.backend.get_value(layer.bias) * self._dt
+                    print("Adapting bias of "+layer.name)
+                    bias = keras.backend.get_value(layer.bias) * factor
                     keras.backend.set_value(layer.bias, bias)
                     if self.config.getboolean('cell', 'bias_relaxation'):
                         keras.backend.set_value(
@@ -181,28 +185,29 @@ class SNN(AbstractSNN):
                         layer.b0, keras.backend.get_value(layer.bias))
 
 
-    def simulate_RNet(self, x=None, y=None, num_detections=200000):
+    def simulate_RNet_compare(self, x=None, y_parsed=None):
         from snntoolbox.utils.utils import echo
         from snntoolbox.simulation.utils import get_layer_synaptic_operations
 
+        num_detections = self.parsed_model.output_shape[-2]
         input_b_l = x * self._dt
         num_timesteps = self._get_timestep_at_spikecount(input_b_l)
-        output_b_l_t = np.zeros((self.batch_size, num_detections, 4+self.num_classes,
-                                 self._num_timesteps))
+        output_b_l_t = np.zeros((self.batch_size, num_detections, 4+self.num_classes))
+        err = np.zeros(num_timesteps)
 
-        detected = 0
         self._input_spikecount = 0
         for sim_step_int in range(num_timesteps):
             sim_step = (sim_step_int + 1) * self._dt
             self.set_time(sim_step)
 
             out_spikes = self.snn.predict_on_batch(input_b_l)
-            detected = max(detected, out_spikes.shape[-2])
+            output_b_l_t += (out_spikes[0] > 0)
+            out = output_b_l_t/sim_step
+            err[sim_step_int] = np.sum(out-y_parsed)
+                
+        return out, err
 
-            output_b_l_t[:, :out_spikes.shape[-2], :, sim_step_int] = out_spikes > 0
 
-        output_b_l_t = output_b_l_t[:, :detected, :, :]
-        return np.cumsum(output_b_l_t, -1)
 
     def simulate_RNet_light(self, x=None, y=None):
         from snntoolbox.utils.utils import echo

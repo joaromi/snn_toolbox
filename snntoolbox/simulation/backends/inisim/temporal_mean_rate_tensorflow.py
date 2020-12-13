@@ -850,18 +850,18 @@ class SpikeNormAdd(Layer):
         conv_weights = self.conv.get_weights()
         if len(weights) == 2:
             conv_weights[:2] = weights
-            print('--',self.name,' - Basic Conv2D weights set.')
+            #print('--',self.name,' - Basic Conv2D weights set.')
         elif len(weights) == 2 + len(self.b):
             conv_weights[:2] = weights[:2]
             self.b = weights[2:]
-            print('--',self.name,' - Basic Conv2D weights and input biases set.')
+            #print('--',self.name,' - Basic Conv2D weights and input biases set.')
         elif len(weights) == len(conv_weights) + len(self.b):
             conv_weights = weights[:len(conv_weights)]
             self.b = weights[len(conv_weights):]
-            print('--',self.name,' - SpikeConv2D weights and input biases set.')
+            #print('--',self.name,' - SpikeConv2D weights and input biases set.')
         elif len(weights) == len(conv_weights):
             conv_weights = weights
-            print('--',self.name,' - SpikeConv2D weights set.')
+            #print('--',self.name,' - SpikeConv2D weights set.')
         else:
             print('<!!! - ',self.name,'> The weights provided do not match the layer shape. \n \
                 - SpikeConv2D accepts list of either length 2 or 5. \n \

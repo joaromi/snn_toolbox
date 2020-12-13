@@ -447,12 +447,14 @@ class AbstractSNN:
 
         #self.preprocessing(**kwargs)
 
+        print('>1> BUILDING SPIKING MODEL:\n')
         # Iterate over layers to create spiking neurons and connections.
         self.setup_layers(batch_shape)
 
-        print("Compiling spiking model...\n")
+        print('\n\n>2> COMPILING SPIKING MODEL:\n')
         self.compile_RNet(loss_fn, optimizer)
 
+        print('\n\n>3> COMPUTING STATS FOR SPIKING MODEL:\n')
         # Compute number of operations of ANN.
         if self.fanout is None:
             self.set_connectivity()
