@@ -870,9 +870,8 @@ def channel_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, 
                     lbdas = np.zeros(n_channels)
                     shifts = np.zeros(n_channels)
                     for ref in refs: # average and min
-                        lbdas += np.array(scale_facs[ref][0]) 
+                        lbdas  = np.fmax(lbdas,  np.array(scale_facs[ref][0])) 
                         shifts = np.fmin(shifts, np.array(scale_facs[ref][1])) 
-                    lbdas /= float(len(refs))
                     for ref in refs: scale_facs[ref] = [lbdas.tolist(), shifts.tolist()]
                     del refs, lbdas, shifts
         
@@ -892,7 +891,7 @@ def channel_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, 
         if len(layer.weights) == 0:
             continue
 
-        # Scale parameters
+         # Scale parameters
         parameters = [np.array(tf.convert_to_tensor(w), dtype='float64') for w in layer.get_weights()]
         lbdas = np.array(scale_facs[layer.name][0], dtype='float64')
         shifts = np.array(scale_facs[layer.name][1], dtype='float64')

@@ -12,6 +12,7 @@ import numpy as np
 
 from snntoolbox.parsing.utils import get_inbound_layers_with_params
 from snntoolbox.simulation.utils import AbstractSNN, remove_name_counter
+from tqdm.auto import tqdm
 
 remove_classifier = False
 
@@ -193,17 +194,19 @@ class SNN(AbstractSNN):
         input_b_l = x * self._dt
         num_timesteps = self._get_timestep_at_spikecount(input_b_l)
         output_b_l_t = np.zeros((self.batch_size, num_detections, 4+self.num_classes))
-        err = np.zeros(num_timesteps)
+        err = np.zeros([num_timesteps,2])
 
         self._input_spikecount = 0
-        for sim_step_int in range(num_timesteps):
+        for sim_step_int in tqdm(range(num_timesteps)):
             sim_step = (sim_step_int + 1) * self._dt
             self.set_time(sim_step)
 
             out_spikes = self.snn.predict_on_batch(input_b_l)
             output_b_l_t += (out_spikes[0] > 0)
-            out = output_b_l_t/sim_step
-            err[sim_step_int] = np.sum(out-y_parsed)
+            out = np.expand_dims(output_b_l_t/sim_step, 0)
+            errs = np.abs(out-y_parsed)
+            err[sim_step_int] = [np.average(errs), np.amax(errs)]
+            #print(str(sim_step_int), end =" ")
                 
         return out, err
 
