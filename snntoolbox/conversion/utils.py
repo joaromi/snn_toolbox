@@ -19,6 +19,7 @@ from collections import OrderedDict
 from tensorflow.keras.models import Model
 import numpy as np
 import tensorflow as tf
+from tqdm.auto import tqdm
 
 
 def layer_norm(model, config, norm_set=None, num_samples=None, divisions=1, free_GB=2, layers_to_plot=[], equiv_layers=[], **kwargs):
@@ -750,8 +751,10 @@ def layer_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, fr
     print('')
 
 
+from functools import reduce
 
-def channel_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, free_GB=2, layers_to_plot=[], equiv_layers=[], **kwargs):
+def channel_norm_J(model, config, norm_set=None, divisions=1, 
+    free_GB=2, layers_to_plot=[], equiv_layers=[], perform_layer_norm_to_these=[], **kwargs):
 
     from snntoolbox.parsing.utils import get_inbound_layers_with_params
 
@@ -774,7 +777,9 @@ def channel_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, 
                 weights[layer.name] = w[0]
         np.savez_compressed(os.path.join(activ_dir, 'weights.npz'), **weights)
 
+    num_samples = config.getint('normalization', 'num_to_norm')
     batch_size = config.getint('simulation', 'batch_size')
+    norm_method = config.getint('normalization', 'method', fallback=0)
 
     # Either load scale factors from disk, or get normalization data set to
     # calculate them.
@@ -789,22 +794,30 @@ def channel_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, 
             scale_facs = json.load(f)
         print('(*) Scale factors loaded from previous run: [', filepath, ']')
     elif norm_set is not None: 
-        print('(*) Computing scale factors from the model. This might take a while...')    
-        print("Using {} samples for normalization: {} packs of {} samples".format(num_samples,
-                                                                            divisions,
-                                                                            samples_in_division))
-        sizes = [
-            samples_in_division * float(np.array(layer.output_shape[1:]).prod()) * float(32 /(8 * 1e9)) \
-                 for layer in model.layers if len(layer.weights) > 0 ]
-        size_str = ['{:.2f}'.format(s) for s in sizes]
-        print('INFO: Size of layer activations: ', size_str ,'GB\n')       
-        req_space = max(sizes)
-        print("Required {:.2f} GB of free space for the largest activation. \n".format(req_space))
-        print("In total, {:.2f} GB of information flow. \n".format(sum(sizes)))
+        print('(*) Computing scale factors from the model. This might take a while...')
+        if norm_method == 1:
+            print("Using {} samples for normalization: METHOD 1".format(num_samples))
+            req_space = 0
+            for layer in model.layers: 
+                if len(layer.weights) > 0:
+                    req_space += (float(np.array(layer.output_shape[1:]).prod()) + 2.0) * float(2*32 /(8 * 1e9))
+            print("Required {:.2f} GB of free space for each sample iteration. \n".format(req_space))
+        else:    
+            print("Using {} samples for normalization: {} packs of {} samples".format(num_samples,
+                                                                                divisions,
+                                                                                samples_in_division))
+            sizes = [
+                samples_in_division * float(np.array(layer.output_shape[1:]).prod()) * float(32 /(8 * 1e9)) \
+                    for layer in model.layers if len(layer.weights) > 0 ]
+            size_str = ['{:.2f}'.format(s) for s in sizes]
+            print('INFO: Size of layer activations: ', size_str ,'GB\n')       
+            req_space = max(sizes)
+            print("Required {:.2f} GB of free space for the largest activation. \n".format(req_space))
+            print("In total, {:.2f} GB of information flow. \n".format(sum(sizes)))
         if req_space > free_GB:
             import warnings
             warnings.warn("Required space is larger than specified free space of "+str(free_GB)+
-            "GB. Reduce size of data set or increase available space.", ResourceWarning)
+            "GB. Reduce sizes of data set or increase available space.", ResourceWarning)
             print('[Skipping normalization]')
             return
         scale_facs = OrderedDict({model.layers[0].name: 1})
@@ -817,44 +830,74 @@ def channel_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, 
 
     # If scale factors have not been computed in a previous run, do so now.
     if len(scale_facs) == 1:
-        i = 0
-        for layer in model.layers:
-            # Skip if layer has no parameters
-            if len(layer.weights) == 0:
-                continue
-            perc = get_percentile(config, i)
-            accum_samples=0
-            layer_lambdas = []
-            layer_shifts = []
-            x = []
-            for sample in norm_set.take(num_samples):
-                x.append(np.array(sample[0], dtype=np.float32))
-                accum_samples+=1
-                if accum_samples>=samples_in_division:
-                    accum_samples = 0
-                    x = np.array(x)[:,0]
-                    tf.keras.backend.clear_session()
-                    activations = np.array(Model(model.input, layer.output).predict(x, batch_size))
-                    nonzero_activations = activations[np.nonzero(activations)]
-                    x = []
-                    if layer.name in layers_to_plot and not layer_lambdas:    
-                        print("Writing "+layer.name+"'s activations to disk...")
-                        np.savez_compressed(os.path.join(activ_dir, layer.name), activations)
-                    layer_lambdas.append(get_scale_fac_channel(activations, perc))
-                    layer_shifts.append(get_shift_channel(activations))
-                    del activations
-            layer_lambdas = np.array(layer_lambdas)
-            layer_shifts = np.array(layer_shifts)
-            scale_facs[layer.name] = [
-                np.average(layer_lambdas, axis=0).tolist(),
-                np.average(layer_shifts, axis=0).tolist()
-            ]
-            print("[✓]  Layer "+str(layer.name))
-            i += 1
-        del x
+        if norm_method == 1:
+            save_interval = config.getint('normalization','save_interval', fallback=None)
+            inps = model.input                                                           # input placeholder
+            outs = [layer.output for layer in model.layers if len(layer.weights)>0]  # all layer outputs
+            lnames = [layer.name for layer in model.layers if len(layer.weights)>0]   
+            norm_model = Model(inputs = inps, outputs = outs) 
+
+            n = np.array([o.shape[-1] for o in outs])
+            lbdas = [np.zeros(o) for o in n]
+            shifts = lbdas.copy()
+            save_counter = 0
+            i=0
+            for sample in tqdm(norm_set.take(num_samples)):
+                activations = norm_model.predict(sample)
+                for j,act in enumerate(activations):
+                    shifts[j] = np.fmin(shifts[j], np.amin(act, axis=(0,1,2)))
+                    lbdas[j] = np.fmax(lbdas[j], np.percentile(act, get_percentile(config, j), axis=(0,1,2)))
+                save_counter+=1
+                if save_counter >= save_interval:
+                    print('[✓] Saving scale_facts at sample ', i, '...')
+                    save_counter=0
+                    for j,nme in enumerate(lnames):
+                        scale_facs[nme] = [lbdas[j].tolist(), shifts[j].tolist()] 
+                    filepath = os.path.join(norm_dir, config.get('normalization','percentile') + 's'+str(i)+'.json')
+                    with open(filepath, str('w')) as f:
+                        json.dump(scale_facs, f)
+                i+=1
+            for j,nme in enumerate(lnames):
+                scale_facs[nme] = [lbdas[j].tolist(), shifts[j].tolist()]    
+        else:
+            i = 0
+            for layer in model.layers:
+                # Skip if layer has no parameters
+                if len(layer.weights) == 0:
+                    continue
+                perc = get_percentile(config, i)
+                accum_samples=0
+                layer_lambdas = []
+                layer_shifts = []
+                x = []
+                for sample in norm_set.take(num_samples):
+                    x.append(np.array(sample[0], dtype=np.float32))
+                    accum_samples+=1
+                    if accum_samples>=samples_in_division:
+                        accum_samples = 0
+                        x = np.array(x)[:,0]
+                        tf.keras.backend.clear_session()
+                        activations = np.array(Model(model.input, layer.output).predict(x, batch_size))
+                        nonzero_activations = activations[np.nonzero(activations)]
+                        x = []
+                        if layer.name in layers_to_plot and not layer_lambdas:    
+                            print("Writing "+layer.name+"'s activations to disk...")
+                            np.savez_compressed(os.path.join(activ_dir, layer.name), activations)
+                        layer_lambdas.append(get_scale_fac_channel(activations, perc))
+                        layer_shifts.append(get_shift_channel(activations))
+                        del activations
+                layer_lambdas = np.array(layer_lambdas)
+                layer_shifts = np.array(layer_shifts)
+                scale_facs[layer.name] = [
+                    np.average(layer_lambdas, axis=0).tolist(),
+                    np.average(layer_shifts, axis=0).tolist()
+                ]
+                print("[✓]  Layer "+str(layer.name))
+                i += 1
+            del x
         # Write scale factors to disk
         filepath = os.path.join(norm_dir, config.get('normalization',
-                                                     'percentile') + '.json')
+                                                    'percentile') + '.json')
         from snntoolbox.utils.utils import confirm_overwrite
         if config.get('output', 'overwrite') or confirm_overwrite(filepath):
             with open(filepath, str('w')) as f:
@@ -862,23 +905,29 @@ def channel_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, 
 
     # Fix RNet heads, they need to be equally weighted
     if equiv_layers:
-        for layer in model.layers:
-            for ix,group in enumerate(equiv_layers):
-                if layer.name in group:
-                    refs = equiv_layers.pop(ix)
-                    n_channels = len(scale_facs[refs[0]][0])
-                    lbdas = np.zeros(n_channels)
-                    shifts = np.zeros(n_channels)
-                    for ref in refs: # average and min
-                        lbdas  = np.fmax(lbdas,  np.array(scale_facs[ref][0])) 
-                        shifts = np.fmin(shifts, np.array(scale_facs[ref][1])) 
-                    for ref in refs: scale_facs[ref] = [lbdas.tolist(), shifts.tolist()]
-                    del refs, lbdas, shifts
+        for ix,group in enumerate(equiv_layers):
+            refs = equiv_layers.pop(ix)
+            n_channels = len(scale_facs[refs[0]][0])
+            lbdas = np.zeros(n_channels)
+            shifts = np.zeros(n_channels)
+            for ref in refs: # average and min
+                lbdas  = np.fmax(lbdas,  np.array(scale_facs[ref][0])) 
+                shifts = np.fmin(shifts, np.array(scale_facs[ref][1])) 
+            for ref in refs: scale_facs[ref] = [lbdas.tolist(), shifts.tolist()]
+            del refs, lbdas, shifts
+
+    for lr in perform_layer_norm_to_these:
+        lbdas = np.array(scale_facs[lr][0])
+        shifts = np.array(scale_facs[lr][1])
+        lbdas = np.array([np.amax(lbdas)]*len(lbdas))
+        shifts = np.array([np.amin(shifts)]*len(shifts))
+        scale_facs[lr] = [lbdas.tolist(), shifts.tolist()]
+        del lbdas, shifts
         
-        filepath = os.path.join(norm_dir, config.get('normalization',
-                                                     'percentile') + '_mod.json')
-        with open(filepath, str('w')) as f:
-            json.dump(scale_facs, f)
+    filepath = os.path.join(norm_dir, config.get('normalization',
+                                                    'percentile') + '_mod.json')
+    with open(filepath, str('w')) as f:
+        json.dump(scale_facs, f)
 
 
     # Apply scale factors to normalize the parameters.
@@ -895,7 +944,6 @@ def channel_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, 
         parameters = [np.array(tf.convert_to_tensor(w), dtype='float64') for w in layer.get_weights()]
         lbdas = np.array(scale_facs[layer.name][0], dtype='float64')
         shifts = np.array(scale_facs[layer.name][1], dtype='float64')
-        #denom = lbdas-shifts
         denom = np.array([aux if aux!=0 else 1 for aux in [l-s for l,s in zip(lbdas,shifts)]], dtype='float64')
         inbound = get_inbound_layers_with_params(layer)
 

@@ -194,7 +194,7 @@ class SNN(AbstractSNN):
         input_b_l = x * self._dt
         num_timesteps = self._get_timestep_at_spikecount(input_b_l)
         output_b_l_t = np.zeros((self.batch_size, num_detections, 4+self.num_classes))
-        err = np.zeros([num_timesteps,2])
+        err = [None]*num_timesteps
 
         self._input_spikecount = 0
         for sim_step_int in tqdm(range(num_timesteps)):
@@ -205,10 +205,12 @@ class SNN(AbstractSNN):
             output_b_l_t += (out_spikes[0] > 0)
             out = np.expand_dims(output_b_l_t/sim_step, 0)
             errs = np.abs(out-y_parsed)
-            err[sim_step_int] = [np.average(errs), np.amax(errs)]
-            #print(str(sim_step_int), end =" ")
+            err[sim_step_int] = [
+                [np.average(errs[:,:,:,:4]), np.amax(errs[:,:,:,:4])],
+                [np.average(errs[:,:,:,4:]), np.amax(errs[:,:,:,4:])]
+            ]
                 
-        return out, err
+        return out, np.array(err), errs
 
 
 
