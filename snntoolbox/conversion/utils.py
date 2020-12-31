@@ -849,7 +849,7 @@ def channel_norm_J(model, config, norm_set=None, divisions=1,
                     lbdas[j] = np.fmax(lbdas[j], np.percentile(act, get_percentile(config, j), axis=(0,1,2)))
                 save_counter+=1
                 if save_counter >= save_interval:
-                    print('[✓] Saving scale_facts at sample ', i, '...')
+                    print('[OK] Saving scale_facts at sample ', i, '...')
                     save_counter=0
                     for j,nme in enumerate(lnames):
                         scale_facs[nme] = [lbdas[j].tolist(), shifts[j].tolist()] 
@@ -892,7 +892,7 @@ def channel_norm_J(model, config, norm_set=None, divisions=1,
                     np.average(layer_lambdas, axis=0).tolist(),
                     np.average(layer_shifts, axis=0).tolist()
                 ]
-                print("[✓]  Layer "+str(layer.name))
+                print("[OK]  Layer "+str(layer.name))
                 i += 1
             del x
         # Write scale factors to disk
@@ -916,13 +916,14 @@ def channel_norm_J(model, config, norm_set=None, divisions=1,
             for ref in refs: scale_facs[ref] = [lbdas.tolist(), shifts.tolist()]
             del refs, lbdas, shifts
 
-    for lr in perform_layer_norm_to_these:
-        lbdas = np.array(scale_facs[lr][0])
-        shifts = np.array(scale_facs[lr][1])
-        lbdas = np.array([np.amax(lbdas)]*len(lbdas))
-        shifts = np.array([np.amin(shifts)]*len(shifts))
-        scale_facs[lr] = [lbdas.tolist(), shifts.tolist()]
-        del lbdas, shifts
+    if perform_layer_norm_to_these:
+        for lr in perform_layer_norm_to_these:
+            lbdas = np.array(scale_facs[lr][0])
+            shifts = np.array(scale_facs[lr][1])
+            lbdas = np.array([np.amax(lbdas)]*len(lbdas))
+            shifts = np.array([np.amin(shifts)]*len(shifts))
+            scale_facs[lr] = [lbdas.tolist(), shifts.tolist()]
+            del lbdas, shifts
         
     filepath = os.path.join(norm_dir, config.get('normalization',
                                                     'percentile') + '_mod.json')

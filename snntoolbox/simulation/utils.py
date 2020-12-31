@@ -314,6 +314,11 @@ class AbstractSNN:
         pass
 
     @abstractmethod
+    def simulate_RNet(self, **kwargs):
+  
+        pass
+
+    @abstractmethod
     def reset(self, sample_idx):
         """Reset network variables.
 
@@ -512,6 +517,48 @@ class AbstractSNN:
             print("Number of synapses: {}\n".format(self.num_synapses))
 
         self.is_built = True
+
+
+    def run_RNet(self, x, y_gt, layers_to_plot=None):
+        from my_functions.retinanet_functions import RetinaNetLoss
+
+        y_parsed = self.parsed_model.predict(x)
+        loss_parsed = self.parsed_model.loss(y_gt, y_parsed).numpy()
+
+        display('Simulating SNN: ')
+        y_spike, err, err_last, loss_snn = self.simulate_RNet(x, y_parsed, y_gt, self.parsed_model.loss)
+
+        if 'error_t' in self._plot_keys:
+            import matplotlib.pyplot as plt
+            print('Max box error = ', np.amax(err_last[0][0][:,:4]))
+            print('Max cls error = ', np.amax(err_last[0][0][:,4:]))
+
+            titles = ['Box error', 'Class error']
+            for i in range(2):
+                plt.figure(figsize=(8,3))
+                plt.plot(err[:,i,:])
+                plt.axhline(0,color='black')
+                plt.title('Parsed vs Spiking model: '+ titles[i])
+                plt.ylabel('Spiking approximation error') 
+                plt.xlabel('Timesteps')
+                plt.legend(['Avg. error', 'Max. error'])
+                plt.show()
+
+            plt.figure(figsize=(8,3))
+            plt.plot(loss_snn)
+            plt.axhline(loss_parsed,color='black')
+            plt.title('Loss evolution with simulation length')
+            plt.ylabel('Loss') 
+            plt.ylim([0,6])
+            plt.xlabel('Timesteps')
+            plt.show()
+
+        if 'correlation' in self._plot_keys:
+            pass
+
+        return y_spike, err, err_last, loss_snn
+
+
 
     def run(self, x_test=None, y_test=None, dataflow=None, **kwargs):
         """ Simulate a spiking network.
