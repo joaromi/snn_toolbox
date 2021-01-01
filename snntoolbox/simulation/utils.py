@@ -519,23 +519,36 @@ class AbstractSNN:
 
         self.is_built = True
 
-
-    def run_RNet(self, x, y_gt=None, layers_to_check=[]):
+    def plot_layer_correlations(self, x, layers_to_check=[]):
         from my_functions.retinanet_functions import RetinaNetLoss
 
         # Get parsed model outputs
-        lr_list = layers_to_check.copy()
-        if self.parsed_model.layers[-1].name not in lr_list: lr_list.append(self.parsed_model.layers[-1].name)
         out_parsed = tf.keras.Model(
             inputs = self.parsed_model.input, 
-            outputs = [layer.output for layer in self.parsed_model.layers if layer.name in lr_list]
+            outputs = [layer.output for layer in self.parsed_model.layers if layer.name in layers_to_check]
             ).predict(x)
 
+        display('Simulating SNN... ')
+        out_spike = self.analyze_RNet(x, layers_to_check)
+
+        print('Correlation between layers:')
+        for name,a,r in zip(layers_to_check,out_parsed,out_spike):
+            if name == self.parsed_model.layers[-1].name:
+                name = name+' (Output)'
+            plot_correl_map(a,r,name)
+
+
+    def run_RNet(self, x, y_gt=None):
+        from my_functions.retinanet_functions import RetinaNetLoss
+
+        # Get parsed model outputs
+        y_parsed = self.parsed_model.predict(x)
+
         if y_gt is not None:
-            loss_parsed = self.parsed_model.loss(y_gt, out_parsed[-1]).numpy()
+            loss_parsed = self.parsed_model.loss(y_gt, y_parsed).numpy()
 
         display('Simulating SNN: ')
-        out_spike, err, err_last, loss_snn = self.simulate_analyze_RNet(x, out_parsed[-1], y_gt, self.parsed_model.loss, layers_to_check)
+        y_spike, err, err_last, loss_snn = self.simulate_RNet(x, y_parsed, y_gt, self.parsed_model.loss)
 
         if 'error_t' in self._plot_keys:
             import matplotlib.pyplot as plt
@@ -562,12 +575,7 @@ class AbstractSNN:
                 plt.xlabel('Timesteps')
                 plt.show()
 
-        if 'correl' in self._plot_keys:
-            print('Correlation between layers:')
-            for name,a,r in zip(lr_list,out_parsed,out_spike):
-                plot_correl_map(a,r,name)
-
-        return out_spike[-1], err, err_last, loss_snn
+        return y_spike, err_last
 
 
 
@@ -1926,6 +1934,8 @@ def remove_name_counter(name_in):
 
 
 def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40):
+    import matplotlib.pyplot as plt
+
     heatmap, xedges, yedges = np.histogram2d(
         np.reshape(a, (-1,)), 
         np.reshape(r, (-1,)), 
