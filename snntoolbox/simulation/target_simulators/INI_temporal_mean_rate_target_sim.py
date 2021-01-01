@@ -237,8 +237,8 @@ class SNN(AbstractSNN):
             if y_parsed is not None:
                 errs = np.abs(out-y_parsed)
                 err[sim_step_int] = [
-                    [np.average(errs[:,:,:,:4]), tf.reduce_max(errs[:,:,:,:4])],
-                    [np.average(errs[:,:,:,4:]), tf.reduce_max(errs[:,:,:,4:])]
+                    [np.average(errs[:,:,:,:4]), np.amax(errs[:,:,:,:4])],
+                    [np.average(errs[:,:,:,4:]), np.amax(errs[:,:,:,4:])]
                 ]
             if y_gt is not None:
                 loss[sim_step_int] = loss_fn(y_gt, out).numpy()

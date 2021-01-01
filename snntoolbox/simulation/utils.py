@@ -573,6 +573,7 @@ class AbstractSNN:
                 plt.ylabel('Loss') 
                 plt.ylim([0,6])
                 plt.xlabel('Timesteps')
+                plt.legend(['Spiking model loss', 'Parsed model loss'])
                 plt.show()
 
         return y_spike, err_last
@@ -1933,7 +1934,7 @@ def remove_name_counter(name_in):
     return (split_underscore[0] + after_ + '/' + split_dash[-1])
 
 
-def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40):
+def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_path='.'):
     import matplotlib.pyplot as plt
 
     heatmap, xedges, yedges = np.histogram2d(
@@ -1942,7 +1943,7 @@ def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40):
         bins=hm_bins)
     extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
     idx = np.random.randint(0, a.size, min(a.size, subset_size))
-    flim = [0, max(1,np.amax(a))]
+    flim = [min(0,np.amin(a)), max(1,np.amax(a))]
 
     fig, axs = plt.subplots(1,2,figsize=(9,4), gridspec_kw={'width_ratios': [1, 1.2]})
     ax = axs[0].scatter(np.reshape(a, (-1,))[idx], 
@@ -1954,7 +1955,7 @@ def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40):
     ax = axs[1].imshow(heatmap.T, extent=flim*2, cmap='Blues', origin='lower')
     axs[1].plot(flim, flim, color='g', linestyle='--', linewidth=1)
     fig.colorbar(ax, ax=axs[1])
-    axs[1].set_title('Frequency map:')
+    axs[1].set_title('Frequency map')
 
     fig.suptitle('Correlation map for layer ' + layer_name, fontsize=14)
     for ax in axs:
@@ -1964,4 +1965,6 @@ def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40):
         ax.set_ylim(flim)
         
     plt.subplots_adjust(left=None, bottom=None, right=None, top=0.8, wspace=0.28, hspace=None)
-    plt.show()
+    plt.savefig(os.path.join(save_path, layer_name+'.png'), bbox_inches='tight')
+    plt.close(fig)
+    print('Saved correlation map for layer {} as [{}]'.format(layer_name, os.path.join(save_path, layer_name+'.png')))
