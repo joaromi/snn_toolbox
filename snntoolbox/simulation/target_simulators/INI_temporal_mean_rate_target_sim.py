@@ -221,7 +221,8 @@ class SNN(AbstractSNN):
         num_detections = self.parsed_model.output_shape[-2]
         input_b_l = x * self._dt
         num_timesteps = self._get_timestep_at_spikecount(input_b_l)
-        output_b_l_t = np.zeros((self.batch_size, 1, num_detections, 4+self.num_classes))
+        #output_b_l_t = np.zeros((self.batch_size, 1, num_detections, 4+self.num_classes))
+        output_b_l_t = np.zeros(self.snn.layers[-1].output_shape)
         err = [None]*num_timesteps
         loss = [None]*num_timesteps
 
@@ -244,21 +245,67 @@ class SNN(AbstractSNN):
           
         return out, np.array(err), errs, loss
 
-    def simulate_analyze_RNet(self, x, y_parsed=None, y_gt=None, loss_fn=None):
+
+    def simulate_analyze_RNet(self, x, y_parsed=None, y_gt=None, loss_fn=None, layers_to_check=[]):
         from snntoolbox.utils.utils import echo
         from snntoolbox.simulation.utils import get_layer_synaptic_operations
 
         num_detections = self.parsed_model.output_shape[-2]
-        input_b_l = x * self._dt
-        num_timesteps = self._get_timestep_at_spikecount(input_b_l)
+        x *= self._dt
+        num_timesteps = self._get_timestep_at_spikecount(x)
+        err = [None]*num_timesteps
+        loss = [None]*num_timesteps
+        out=[]
+
+        for out_layer in layers_to_check:
+            display(out_layer)
+            tf.keras.backend.clear_session() 
+            model = tf.keras.Model(inputs = self.snn.input, outputs = self.snn.get_layer(out_layer).output) 
+            output_b_l_t = np.zeros(self.snn.get_layer(out_layer).output_shape)
+            self._input_spikecount = 0
+            for sim_step_int in tqdm(range(num_timesteps)):
+                sim_step = (sim_step_int + 1) * self._dt
+                self.set_time(sim_step)
+                out_spikes = model.predict_on_batch(x) #.predict_on_batch
+                output_b_l_t += (out_spikes > 0)
+            out.append((output_b_l_t/sim_step).astype('float32'))
+        del model
+            
+        display('Output')
+        self._input_spikecount = 0
+        output_b_l_t = np.zeros(self.snn.layers[-1].output_shape)
+        for sim_step_int in tqdm(range(num_timesteps)):
+            sim_step = (sim_step_int + 1) * self._dt
+            self.set_time(sim_step)
+            out_spikes = self.snn.predict_on_batch(x) #.predict_on_batch
+            output_b_l_t += (out_spikes > 0)
+            y_pred=(output_b_l_t/sim_step).astype('float32')
+            if y_parsed is not None:
+                errs = np.abs(y_pred-y_parsed)
+                err[sim_step_int] = [
+                    [np.average(errs[:,:,:,:4]), tf.reduce_max(errs[:,:,:,:4])],
+                    [np.average(errs[:,:,:,4:]), tf.reduce_max(errs[:,:,:,4:])]
+                ]
+            if y_gt is not None:
+                loss[sim_step_int] = loss_fn(y_gt, y_pred).numpy()
+        out.append(y_pred)
+        return out, np.array(err), errs, loss
+
+
+    def simulate_analyze_RNet2(self, x, y_parsed=None, y_gt=None, loss_fn=None, layers_to_check=[]):
+        from snntoolbox.utils.utils import echo
+        from snntoolbox.simulation.utils import get_layer_synaptic_operations
+
+        x *= self._dt
+        num_timesteps = self._get_timestep_at_spikecount(x)
         err = [None]*num_timesteps
         loss = [None]*num_timesteps
 
-        if layers_to_check is None: layers_to_check = [self.snn.layers[-1].name]
+        if self.snn.layers[-1].name not in layers_to_check: layers_to_check.append(self.snn.layers[-1].name)
         tf.keras.backend.clear_session()
         inps = self.snn.input                                                         
         outs = [layer.output for layer in self.snn.layers if layer.name in layers_to_check]
-        output_b_l_t = [zeros(layer.output_shape) for layer in self.snn.layers if layer.name in layers_to_check]  
+        output_b_l_t = [np.zeros(layer.output_shape) for layer in self.snn.layers if layer.name in layers_to_check]  
         model = tf.keras.Model(inputs = inps, outputs = outs) 
 
         self._input_spikecount = 0
@@ -266,57 +313,20 @@ class SNN(AbstractSNN):
             sim_step = (sim_step_int + 1) * self._dt
             self.set_time(sim_step)
 
-            out_spikes = self.snn.predict_on_batch(input_b_l) #.predict_on_batch
-            output_b_l_t += (out_spikes > 0)
-            out = tf.convert_to_tensor(output_b_l_t/sim_step, dtype=tf.float32)
+            out_spikes = model.predict(x) #.predict_on_batch
+            output_b_l_t = [acc+(spikes>0) for acc,spikes in zip(output_b_l_t,out_spikes)]
+            y_pred = output_b_l_t[-1]/sim_step
             if y_parsed is not None:
-                errs = np.abs(out[-1]-y_parsed)
+                errs = np.abs(y_pred-y_parsed)
                 err[sim_step_int] = [
-                    [np.average(errs[:,:,:,:4]), tf.reduce_max(errs[:,:,:,:4])],
-                    [np.average(errs[:,:,:,4:]), tf.reduce_max(errs[:,:,:,4:])]
+                    [np.average(errs[:,:,:,:4]), np.amax(errs[:,:,:,:4])],
+                    [np.average(errs[:,:,:,4:]), np.amax(errs[:,:,:,4:])]
                 ]
             if y_gt is not None:
-                loss[sim_step_int] = loss_fn(y_gt, out[-1]).numpy()
-          
+                loss[sim_step_int] = loss_fn(y_gt, y_pred).numpy()
+
+        out = [acc/sim_step for acc in output_b_l_t]  
         return out, np.array(err), errs, loss
-
-    # def simulate_analyze_RNet(self, x=None, y_parsed=None, y_gt=None, norm=None, layers_to_check=None):
-    #     from snntoolbox.utils.utils import echo
-    #     from snntoolbox.simulation.utils import get_layer_synaptic_operations
-    #     from my_functions.retinanet_functions import RetinaNetLoss
-
-    #     num_detections = self.parsed_model.output_shape[-2]
-    #     input_b_l = x * self._dt
-    #     num_timesteps = self._get_timestep_at_spikecount(input_b_l)
-    #     output_b_l_t = np.zeros((self.batch_size, num_detections, 4+self.num_classes))
-    #     err = [None]*num_timesteps
-    #     loss = [None]*num_timesteps
-
-    #     if layers_to_check is None: layers_to_check = [self.snn.layers[-1].name]
-    #     tf.keras.backend.clear_session()
-    #     inps = self.snn.input                                                         
-    #     outs = [layer.output for layer in self.snn.layers if layer.name in layers_to_check]  
-    #     model = tf.keras.Model(inputs = inps, outputs = outs) 
-
-    #     self._input_spikecount = 0
-    #     for sim_step_int in tqdm(range(num_timesteps)):
-    #         sim_step = (sim_step_int + 1) * self._dt
-    #         self.set_time(sim_step)
-
-    #         out_spikes = model.predict(input_b_l) #.predict_on_batch
-    #         output_b_l_t += (out_spikes[:,0] > 0)
-    #         out = tf.convert_to_tensor(np.expand_dims(output_b_l_t/sim_step, 0), dtype=tf.float32)
-    #         if y_parsed is not None:
-    #             errs = np.abs(out[-1]-y_parsed)
-    #             err[sim_step_int] = [
-    #                 [np.average(errs[:,:,:,:4]), tf.reduce_max(errs[:,:,:,:4])],
-    #                 [np.average(errs[:,:,:,4:]), tf.reduce_max(errs[:,:,:,4:])]
-    #             ]
-    #         if y_gt is not None:
-    #             loss[sim_step_int] = RetinaNetLoss(self.num_classes, batch_size=1, norm=norm)(y_gt, out[-1])
-          
-    #     return out, np.array(err), errs, loss
-
 
 
     def simulate_RNet_light(self, x=None, y=None):

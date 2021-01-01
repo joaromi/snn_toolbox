@@ -14,6 +14,7 @@ import os
 import sys
 from abc import abstractmethod
 import numpy as np
+import tensorflow as tf
 from tensorflow import keras
 from tensorflow.python.keras.utils.conv_utils import convert_kernel
 
@@ -519,14 +520,22 @@ class AbstractSNN:
         self.is_built = True
 
 
-    def run_RNet(self, x, y_gt, layers_to_plot=None):
+    def run_RNet(self, x, y_gt=None, layers_to_check=[]):
         from my_functions.retinanet_functions import RetinaNetLoss
 
-        y_parsed = self.parsed_model.predict(x)
-        loss_parsed = self.parsed_model.loss(y_gt, y_parsed).numpy()
+        # Get parsed model outputs
+        lr_list = layers_to_check.copy()
+        if self.parsed_model.layers[-1].name not in lr_list: lr_list.append(self.parsed_model.layers[-1].name)
+        out_parsed = tf.keras.Model(
+            inputs = self.parsed_model.input, 
+            outputs = [layer.output for layer in self.parsed_model.layers if layer.name in lr_list]
+            ).predict(x)
+
+        if y_gt is not None:
+            loss_parsed = self.parsed_model.loss(y_gt, out_parsed[-1]).numpy()
 
         display('Simulating SNN: ')
-        y_spike, err, err_last, loss_snn = self.simulate_RNet(x, y_parsed, y_gt, self.parsed_model.loss)
+        out_spike, err, err_last, loss_snn = self.simulate_analyze_RNet(x, out_parsed[-1], y_gt, self.parsed_model.loss, layers_to_check)
 
         if 'error_t' in self._plot_keys:
             import matplotlib.pyplot as plt
@@ -537,26 +546,28 @@ class AbstractSNN:
             for i in range(2):
                 plt.figure(figsize=(8,3))
                 plt.plot(err[:,i,:])
-                plt.axhline(0,color='black')
                 plt.title('Parsed vs Spiking model: '+ titles[i])
                 plt.ylabel('Spiking approximation error') 
                 plt.xlabel('Timesteps')
                 plt.legend(['Avg. error', 'Max. error'])
                 plt.show()
 
-            plt.figure(figsize=(8,3))
-            plt.plot(loss_snn)
-            plt.axhline(loss_parsed,color='black')
-            plt.title('Loss evolution with simulation length')
-            plt.ylabel('Loss') 
-            plt.ylim([0,6])
-            plt.xlabel('Timesteps')
-            plt.show()
+            if y_gt is not None:
+                plt.figure(figsize=(8,3))
+                plt.plot(loss_snn)
+                plt.axhline(loss_parsed, color='g', linestyle='--')
+                plt.title('Loss evolution with simulation length')
+                plt.ylabel('Loss') 
+                plt.ylim([0,6])
+                plt.xlabel('Timesteps')
+                plt.show()
 
-        if 'correlation' in self._plot_keys:
-            pass
+        if 'correl' in self._plot_keys:
+            print('Correlation between layers:')
+            for name,a,r in zip(lr_list,out_parsed,out_spike):
+                plot_correl_map(a,r,name)
 
-        return y_spike, err, err_last, loss_snn
+        return out_spike[-1], err, err_last, loss_snn
 
 
 
@@ -1912,3 +1923,35 @@ def remove_name_counter(name_in):
         after_=''
     # The first '_' is assigned by SNN toolbox and should be kept.
     return (split_underscore[0] + after_ + '/' + split_dash[-1])
+
+
+def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40):
+    heatmap, xedges, yedges = np.histogram2d(
+        np.reshape(a, (-1,)), 
+        np.reshape(r, (-1,)), 
+        bins=hm_bins)
+    extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+    idx = np.random.randint(0, a.size, min(a.size, subset_size))
+    flim = [0, max(1,np.amax(a))]
+
+    fig, axs = plt.subplots(1,2,figsize=(9,4), gridspec_kw={'width_ratios': [1, 1.2]})
+    ax = axs[0].scatter(np.reshape(a, (-1,))[idx], 
+                        np.reshape(r, (-1,))[idx], 
+                        s=10, alpha=0.3)
+    axs[0].plot(flim, flim, color='g', linestyle='--', linewidth=1)
+    axs[0].set_title('Scatter plot')
+
+    ax = axs[1].imshow(heatmap.T, extent=flim*2, cmap='Blues', origin='lower')
+    axs[1].plot(flim, flim, color='g', linestyle='--', linewidth=1)
+    fig.colorbar(ax, ax=axs[1])
+    axs[1].set_title('Frequency map:')
+
+    fig.suptitle('Correlation map for layer ' + layer_name, fontsize=14)
+    for ax in axs:
+        ax.set_xlabel('Activations')
+        ax.set_ylabel('Spiking rates')
+        ax.set_xlim(flim)
+        ax.set_ylim(flim)
+        
+    plt.subplots_adjust(left=None, bottom=None, right=None, top=0.8, wspace=0.28, hspace=None)
+    plt.show()
