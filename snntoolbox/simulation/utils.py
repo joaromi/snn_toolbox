@@ -519,7 +519,7 @@ class AbstractSNN:
 
         self.is_built = True
 
-    def plot_layer_correlations(self, x, layers_to_check=[]):
+    def plot_layer_correlations(self, x, layers_to_check=[], save_path='.'):
         from my_functions.retinanet_functions import RetinaNetLoss
 
         # Get parsed model outputs
@@ -535,11 +535,14 @@ class AbstractSNN:
         for name,a,r in zip(layers_to_check,out_parsed,out_spike):
             if name == self.parsed_model.layers[-1].name:
                 name = name+' (Output)'
-            plot_correl_map(a,r,name)
+            plot_correl_map(a,r,name,save_path=save_path)
 
 
-    def run_RNet(self, x, y_gt=None):
-        from my_functions.retinanet_functions import RetinaNetLoss
+    def run_RNet(self, x, y_gt=None, save_path=None):
+        from matplotlib import rcParams
+        rcParams['font.family'] = 'serif'
+        rcParams['font.sans-serif'] = ['CMU']
+        import matplotlib.pyplot as plt
 
         # Get parsed model outputs
         y_parsed = self.parsed_model.predict(x)
@@ -551,7 +554,6 @@ class AbstractSNN:
         y_spike, err, err_last, loss_snn = self.simulate_RNet(x, y_parsed, y_gt, self.parsed_model.loss)
 
         if 'error_t' in self._plot_keys:
-            import matplotlib.pyplot as plt
             print('Max box error = ', np.amax(err_last[0][0][:,:4]))
             print('Max cls error = ', np.amax(err_last[0][0][:,4:]))
 
@@ -563,6 +565,9 @@ class AbstractSNN:
                 plt.ylabel('Spiking approximation error') 
                 plt.xlabel('Timesteps')
                 plt.legend(['Avg. error', 'Max. error'])
+                if save_path is not None:
+                    plt.savefig(os.path.join(save_path, titles[i]+'.png'), bbox_inches='tight')
+                    print('Saved {} graph as [{}]'.format(titles[i], os.path.join(save_path, titles[i]+'.png')))
                 plt.show()
 
             if y_gt is not None:
@@ -574,8 +579,11 @@ class AbstractSNN:
                 plt.ylim([0,6])
                 plt.xlabel('Timesteps')
                 plt.legend(['Spiking model loss', 'Parsed model loss'])
+                if save_path is not None:
+                    plt.savefig(os.path.join(save_path,'loss_time.png'), bbox_inches='tight')
+                    print('Saved loss graph as [{}]'.format(os.path.join(save_path, 'loss_time.png')))
                 plt.show()
-
+                
         return y_spike, err_last
 
 
@@ -1935,19 +1943,22 @@ def remove_name_counter(name_in):
 
 
 def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_path='.'):
+    from matplotlib import rcParams
+    rcParams['font.family'] = 'serif'
+    rcParams['font.sans-serif'] = ['CMU']
     import matplotlib.pyplot as plt
 
     heatmap, xedges, yedges = np.histogram2d(
         np.reshape(a, (-1,)), 
         np.reshape(r, (-1,)), 
         bins=hm_bins)
-    extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+    #extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
     idx = np.random.randint(0, a.size, min(a.size, subset_size))
-    flim = [min(0,np.amin(a)), max(1,np.amax(a))]
+    aplot = np.reshape(a, (-1,))[idx]
+    flim = [min(0,np.amin(aplot)), max(1,np.amax(aplot))]
 
     fig, axs = plt.subplots(1,2,figsize=(9,4), gridspec_kw={'width_ratios': [1, 1.2]})
-    ax = axs[0].scatter(np.reshape(a, (-1,))[idx], 
-                        np.reshape(r, (-1,))[idx], 
+    ax = axs[0].scatter(aplot, np.reshape(r, (-1,))[idx], 
                         s=10, alpha=0.3)
     axs[0].plot(flim, flim, color='g', linestyle='--', linewidth=1)
     axs[0].set_title('Scatter plot')
@@ -1963,6 +1974,9 @@ def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_p
         ax.set_ylabel('Spiking rates')
         ax.set_xlim(flim)
         ax.set_ylim(flim)
+        for i in range(2):
+            ax.axhline(i, color='k', linestyle='--', linewidth=.5)
+            ax.axvline(i, color='k', linestyle='--', linewidth=.5)
         
     plt.subplots_adjust(left=None, bottom=None, right=None, top=0.8, wspace=0.28, hspace=None)
     plt.savefig(os.path.join(save_path, layer_name+'.png'), bbox_inches='tight')

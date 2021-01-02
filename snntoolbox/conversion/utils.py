@@ -753,8 +753,8 @@ def layer_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, fr
 
 from functools import reduce
 
-def channel_norm_J(model, config, norm_set=None, divisions=1, 
-    free_GB=2, layers_to_plot=[], equiv_layers=[], perform_layer_norm_to_these=[], **kwargs):
+def channel_norm_J(model, config, norm_set=None, divisions=1, free_GB=2, layers_to_plot=[], 
+        equiv_layers=[], perform_layer_norm_to_these=[], scaling_coef=1, **kwargs):
 
     from snntoolbox.parsing.utils import get_inbound_layers_with_params
 
@@ -838,15 +838,17 @@ def channel_norm_J(model, config, norm_set=None, divisions=1,
             norm_model = Model(inputs = inps, outputs = outs) 
 
             n = np.array([o.shape[-1] for o in outs])
-            lbdas = [np.zeros(o) for o in n]
-            shifts = lbdas.copy()
+            lbdas = [np.ones(o)*-1000 for o in n]
+            shifts = [np.ones(o)*1000 for o in n]
             save_counter = 0
             i=0
             for sample in tqdm(norm_set.take(num_samples)):
                 activations = norm_model.predict(sample)
                 for j,act in enumerate(activations):
-                    shifts[j] = np.fmin(shifts[j], np.amin(act, axis=(0,1,2)))
-                    lbdas[j] = np.fmax(lbdas[j], np.percentile(act, get_percentile(config, j), axis=(0,1,2)))
+                    perc = get_percentile(config, j)
+                    new_scale_facts = np.percentile(act, [100-perc, perc], axis=(0,1,2))
+                    shifts[j] = np.fmin(shifts[j], new_scale_facts[0])
+                    lbdas[j] = np.fmax(lbdas[j], new_scale_facts[1])
                 save_counter+=1
                 if save_counter >= save_interval:
                     print('[OK] Saving scale_facts at sample ', i, '...')
@@ -903,7 +905,8 @@ def channel_norm_J(model, config, norm_set=None, divisions=1,
             with open(filepath, str('w')) as f:
                 json.dump(scale_facs, f)
 
-    # Fix RNet heads, they need to be equally weighted
+    # MODIFICATIONS TO OBTAINED WEIGHTS
+    # 1 Fix RNet heads, they need to be equally weighted
     if equiv_layers:
         for ix,group in enumerate(equiv_layers):
             refs = equiv_layers.pop(ix)
@@ -916,7 +919,10 @@ def channel_norm_J(model, config, norm_set=None, divisions=1,
             for ref in refs: scale_facs[ref] = [lbdas.tolist(), shifts.tolist()]
             del refs, lbdas, shifts
 
+    # 2
     if perform_layer_norm_to_these:
+        if perform_layer_norm_to_these in ['all', 'All']:
+            perform_layer_norm_to_these = [lr.name for lr in model.layers if len(lr.weights) != 0]
         for lr in perform_layer_norm_to_these:
             lbdas = np.array(scale_facs[lr][0])
             shifts = np.array(scale_facs[lr][1])
@@ -924,6 +930,15 @@ def channel_norm_J(model, config, norm_set=None, divisions=1,
             shifts = np.array([np.amin(shifts)]*len(shifts))
             scale_facs[lr] = [lbdas.tolist(), shifts.tolist()]
             del lbdas, shifts
+
+    # 3
+    for layer in model.layers: 
+        if len(layer.weights) != 0:
+            scale_facs[layer.name] = [
+                (np.array(scale_facs[layer.name][0])*scaling_coef).tolist(),
+                (np.array(scale_facs[layer.name][1])*scaling_coef).tolist()
+            ]
+    
         
     filepath = os.path.join(norm_dir, config.get('normalization',
                                                     'percentile') + '_mod.json')
@@ -945,6 +960,7 @@ def channel_norm_J(model, config, norm_set=None, divisions=1,
         parameters = [np.array(tf.convert_to_tensor(w), dtype='float64') for w in layer.get_weights()]
         lbdas = np.array(scale_facs[layer.name][0], dtype='float64')
         shifts = np.array(scale_facs[layer.name][1], dtype='float64')
+        denom = lbdas-shifts
         denom = np.array([aux if aux!=0 else 1 for aux in [l-s for l,s in zip(lbdas,shifts)]], dtype='float64')
         inbound = get_inbound_layers_with_params(layer)
 
@@ -959,6 +975,7 @@ def channel_norm_J(model, config, norm_set=None, divisions=1,
         elif len(inbound) == 1:
             lbdas0  = np.array(scale_facs[inbound[0].name][0], dtype='float64')
             shifts0 = np.array(scale_facs[inbound[0].name][1], dtype='float64')
+            denom0 = lbdas0-shifts0
             denom0 = np.array([aux if aux!=0 else 1 for aux in [l-s for l,s in zip(lbdas0,shifts0)]], dtype='float64')
             parameters_norm = parameters.copy()
 
@@ -999,68 +1016,6 @@ def channel_norm_J(model, config, norm_set=None, divisions=1,
         # Update model with modified parameters
         layer.set_weights(parameters_norm)
 
-    # Plot distributions of weights and activations before and after norm.
-    if 'normalization_activations' in eval(config.get('output', 'plot_vars')) and layers_to_plot:
-        from snntoolbox.simulation.plotting import plot_hist
-        from snntoolbox.simulation.plotting import plot_max_activ_hist
-
-        # All layers in one plot. Assumes model.get_weights() returns
-        # [w, b, w, b, ...].
-        # from snntoolbox.simulation.plotting import plot_weight_distribution
-        # plot_weight_distribution(norm_dir, model)
-
-        print("Plotting distributions of weights and activations before and "
-              "after normalizing...")
-
-        # Load original parsed model to get parameters before normalization
-        weights = np.load(os.path.join(activ_dir, 'weights.npz'))
-
-        x=[]
-        for sample in norm_set.take(samples_in_division):
-            x.append(np.array(sample[0], dtype=np.float32))
-        x = np.array(x)[:,0]
-                
-        for idx, layer in enumerate(model.layers):
-            # Skip if layer has no parameters
-            if len(layer.weights) == 0 or layer.name not in layers_to_plot:
-                continue
-
-            label = str(idx) + layer.__class__.__name__ \
-                if config.getboolean('output', 'use_simple_labels') \
-                else layer.name
-            parameters = weights[layer.name]
-            parameters_norm = layer.get_weights()[0]
-            weight_dict = {'weights': parameters.flatten(),
-                           'weights_norm': parameters_norm.flatten()}
-            plot_hist(weight_dict, 'Weight', label, norm_dir)
-
-            # Load activations of model before normalization
-            try:
-                activations = np.load(os.path.join(activ_dir, layer.name + '.npz'))['arr_0']
-            except IOError:
-                    print('Error when loading activations from [',
-                            os.path.join(activ_dir, layer.name + '.npz'),
-                            ']. \n...Skipping layer...')
-                    continue
-
-            if activations is None:
-                continue
-
-            # Compute activations with modified parameters
-            nonzero_activations = activations[np.nonzero(activations)]
-            tf.keras.backend.clear_session()
-            activations_norm = np.array(Model(model.input, layer.output).predict(x, batch_size))
-            activation_dict = {'Activations': nonzero_activations,
-                               'Activations_norm':
-                               activations_norm[np.nonzero(activations_norm)]}
-            scale_fac = scale_facs[layer.name]
-            plot_hist(activation_dict, 'Activation', label, norm_dir,
-                      scale_fac)
-            ax = tuple(np.arange(len(layer.output_shape))[1:])
-            plot_max_activ_hist(
-                {'Activations_max': np.max(activations, axis=ax)},
-                'Maximum Activation', label, norm_dir, scale_fac)
-            np.savez_compressed(os.path.join(norm_activ_dir, layer.name), activations_norm)
     print('')
 
 
