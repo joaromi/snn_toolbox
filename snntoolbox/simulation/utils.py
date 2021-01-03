@@ -1942,28 +1942,33 @@ def remove_name_counter(name_in):
     return (split_underscore[0] + after_ + '/' + split_dash[-1])
 
 
-def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_path='.'):
+def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_path='.', lim01=False, show_plot=False):
     from matplotlib import rcParams
     rcParams['font.family'] = 'serif'
     rcParams['font.sans-serif'] = ['CMU']
     import matplotlib.pyplot as plt
 
+    idx = np.random.randint(0, a.size, min(a.size, subset_size))
+    aplot = np.reshape(a, (-1,))[idx]
+    if lim01:
+        flim=[0,1]
+    else:
+        flim = [min(0,np.amin(aplot)), max(1,np.amax(aplot))]
+
     heatmap, xedges, yedges = np.histogram2d(
         np.reshape(a, (-1,)), 
         np.reshape(r, (-1,)), 
-        bins=hm_bins)
-    #extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
-    idx = np.random.randint(0, a.size, min(a.size, subset_size))
-    aplot = np.reshape(a, (-1,))[idx]
-    flim = [min(0,np.amin(aplot)), max(1,np.amax(aplot))]
+        bins=hm_bins, range=[flim, flim])
+    extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
 
     fig, axs = plt.subplots(1,2,figsize=(9,4), gridspec_kw={'width_ratios': [1, 1.2]})
     ax = axs[0].scatter(aplot, np.reshape(r, (-1,))[idx], 
                         s=10, alpha=0.3)
     axs[0].plot(flim, flim, color='g', linestyle='--', linewidth=1)
     axs[0].set_title('Scatter plot')
-
-    ax = axs[1].imshow(heatmap.T, extent=flim*2, cmap='Blues', origin='lower')
+    
+    #flim*2
+    ax = axs[1].imshow(heatmap.T, extent=extent, cmap='Blues', origin='lower')
     axs[1].plot(flim, flim, color='g', linestyle='--', linewidth=1)
     fig.colorbar(ax, ax=axs[1])
     axs[1].set_title('Frequency map')
@@ -1980,5 +1985,6 @@ def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_p
         
     plt.subplots_adjust(left=None, bottom=None, right=None, top=0.8, wspace=0.28, hspace=None)
     plt.savefig(os.path.join(save_path, layer_name+'.png'), bbox_inches='tight')
-    plt.close(fig)
+    if show_plot: plt.show()
+    else: plt.close(fig)
     print('Saved correlation map for layer {} as [{}]'.format(layer_name, os.path.join(save_path, layer_name+'.png')))

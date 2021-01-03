@@ -754,7 +754,7 @@ def layer_norm_J(model, config, norm_set=None, num_samples=None, divisions=1, fr
 from functools import reduce
 
 def channel_norm_J(model, config, norm_set=None, divisions=1, free_GB=2, layers_to_plot=[], 
-        equiv_layers=[], perform_layer_norm_to_these=[], scaling_coef=1, **kwargs):
+        equiv_layers=[], perform_layer_norm_to_these=[], trim_these = None, scaling_coef=1, **kwargs):
 
     from snntoolbox.parsing.utils import get_inbound_layers_with_params
 
@@ -919,7 +919,7 @@ def channel_norm_J(model, config, norm_set=None, divisions=1, free_GB=2, layers_
             for ref in refs: scale_facs[ref] = [lbdas.tolist(), shifts.tolist()]
             del refs, lbdas, shifts
 
-    # 2
+    # 2 Perform layer_norm to some layers
     if perform_layer_norm_to_these:
         if perform_layer_norm_to_these in ['all', 'All']:
             perform_layer_norm_to_these = [lr.name for lr in model.layers if len(lr.weights) != 0]
@@ -931,7 +931,7 @@ def channel_norm_J(model, config, norm_set=None, divisions=1, free_GB=2, layers_
             scale_facs[lr] = [lbdas.tolist(), shifts.tolist()]
             del lbdas, shifts
 
-    # 3
+    # 3 Manually scale all scale facts
     for layer in model.layers: 
         if len(layer.weights) != 0:
             scale_facs[layer.name] = [
@@ -939,6 +939,14 @@ def channel_norm_J(model, config, norm_set=None, divisions=1, free_GB=2, layers_
                 (np.array(scale_facs[layer.name][1])*scaling_coef).tolist()
             ]
     
+    # 4 Manually trim some scale facts
+    if trim_these is not None:
+        for layer_name in trim_these['layers']:
+            scale_facs[layer_name] = [
+                np.fmin(np.array(scale_facs[layer_name][0]), trim_these['limits'][1]).tolist(),
+                np.fmax(np.array(scale_facs[layer_name][1]), trim_these['limits'][0]).tolist()
+            ]
+
         
     filepath = os.path.join(norm_dir, config.get('normalization',
                                                     'percentile') + '_mod.json')
