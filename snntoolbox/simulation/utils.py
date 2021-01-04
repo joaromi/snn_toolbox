@@ -519,8 +519,7 @@ class AbstractSNN:
 
         self.is_built = True
 
-    def plot_layer_correlations(self, x, layers_to_check=[], save_path='.'):
-        from my_functions.retinanet_functions import RetinaNetLoss
+    def plot_layer_correlations(self, x, layers_to_check=[], save_path='.', duration=None):
 
         # Get parsed model outputs
         out_parsed = tf.keras.Model(
@@ -529,13 +528,78 @@ class AbstractSNN:
             ).predict(x)
 
         display('Simulating SNN... ')
-        out_spike = self.analyze_RNet(x, layers_to_check)
+        out_spike = self.analyze_RNet(x, layers_to_check, duration=duration)
 
         print('Correlation between layers:')
         for name,a,r in zip(layers_to_check,out_parsed,out_spike):
             if name == self.parsed_model.layers[-1].name:
                 name = name+' (Output)'
             plot_correl_map(a,r,name,save_path=save_path)
+
+    
+    def run_analysis(self, x, y=None, layers_to_check=[], save_path='.', t_to_check=None, loss_smooth=3, loss_ylim=[0,6]):
+        #from tqdm.auto import tqdm
+
+        # Get parsed model outputs
+        out_parsed = tf.keras.Model(
+            inputs = self.parsed_model.input, 
+            outputs = [layer.output for layer in self.parsed_model.layers if layer.name in layers_to_check]
+            ).predict(x)
+
+        # Interpret t_to_check attribute
+        if t_to_check is None: t_to_check = self._duration
+        if hasattr(t_to_check, '__len__'):
+            if t_to_check[0]!=self._dt: t_to_check = [self._dt]+t_to_check
+        else: t_to_check = range(self._dt,t_to_check,step=float(t_to_check)/3)
+
+        # If output layer in layers_to_check, compute loss
+        plot_loss = self.parsed_model.layers[-1].name == layers_to_check[-1] and y is not None
+        if plot_loss:
+            loss_parsed = self.parsed_model.loss(y, out_parsed[-1]).numpy()
+            #loss_spike = [None]*len(t_to_check)
+            loss_spike=np.zeros(int(t_to_check[-1]/self._dt))
+            t_loss = np.arange(0,int(t_to_check[-1]/self._dt),step=self._dt)+self._dt
+        else: y=None
+
+        display('Simulation and analyzing SNN')
+        t0 = 0
+        lm = 0
+        out_spike = None
+        for i,t in enumerate(t_to_check):
+            display('t = [{:.1f} ---> {:.1f}]'.format(t0,t))
+            duration = t-t0
+            if duration < self._dt: continue
+
+            out_spike,t1,loss_it = self.analyze_RNet(x, y, layers_to_check, duration=duration,
+                        previous_out = (out_spike,t0), return_the_rate=False)
+
+            assert t1 == t, 'Error in simulation time'
+            out_rate = [(layer_spikes/t).astype('float32') for layer_spikes in out_spike]
+            if plot_loss:
+                #loss_spike[i] = self.parsed_model.loss(y, out_rate[-1]).numpy()
+                loss_spike[lm:lm+len(loss_it)]=loss_it
+            t0 = t
+            lm=lm+len(loss_it)
+
+            # Plot correlations
+            timetxt = str(t) if isinstance(t, int) else '{:.1f}'.format(t)
+            
+            for name,a,r in zip(layers_to_check,out_parsed,out_rate):
+                if name == self.parsed_model.layers[-1].name:
+                    name = name+'[Output]'
+                corr_path = os.path.join(save_path,name)
+                if not os.path.exists(corr_path): os.mkdir(corr_path)
+                name = name+'  ('+timetxt+' ms)'
+                plot_correl_map(a,r,name,save_path=corr_path, verbose=0)
+
+        loss_spike = np.array(loss_spike)
+        t_loss = np.array(t_loss)
+        # Plot loss
+        plot_loss_evolution(loss_spike, time_array=t_loss, loss_parsed=loss_parsed, 
+            save_path=save_path, markers=None, verbose=0, ylim=loss_ylim)
+
+        return out_rate[-1]
+    
 
 
     def run_RNet(self, x, y_gt=None, save_path=None):
@@ -1942,7 +2006,40 @@ def remove_name_counter(name_in):
     return (split_underscore[0] + after_ + '/' + split_dash[-1])
 
 
-def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_path='.', lim01=False, show_plot=False):
+def plot_loss_evolution(loss_array, time_array=None, loss_parsed = None, show_plot=True,
+        figsize=(8,3), ylim=None, save_path = None, markers=None, verbose=1):
+    
+    import matplotlib.pyplot as plt
+
+    if time_array is None: time_array = np.arange(len(loss_array))
+
+    plt.figure(figsize=figsize)
+    if loss_parsed is not None:
+        plt.axhline(loss_parsed, color='g', linestyle='--')
+    plt.plot(time_array, loss_array)
+    if markers is not None:
+        plt.scatter(time_array, loss_array, marker=markers)
+    plt.title('Loss evolution with simulation length')
+    plt.ylabel('Loss') 
+    if ylim is not None: plt.ylim(ylim)
+    plt.xlabel('Timesteps')
+    plt.legend(["Parsed  model loss = {:6.3f}".format(loss_parsed),
+                "Spiking model loss = {:6.3f}".format(loss_array[-1])
+        ])
+    # ax.annotate(
+    #         'test', xy=(time_array[-1]*7/8, loss_array[-1]+(loss_array[0]-loss_array[-1])*1/8),  xycoords='data',
+    #         horizontalalignment='right', verticalalignment='top', 
+    #         color='black', fontsize=10, style='italic'
+    #         )
+    if save_path is not None:
+        plt.savefig(os.path.join(save_path,'loss_time.png'), bbox_inches='tight')
+        if verbose: print('Saved loss graph as [{}]'.format(os.path.join(save_path, 'loss_time.png')))
+    if show_plot: plt.show()
+    else: plt.close(fig)
+
+
+def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_path='.', 
+    lim01=False, show_plot=False, figsize=(9,4), verbose=1):
     from matplotlib import rcParams
     rcParams['font.family'] = 'serif'
     rcParams['font.sans-serif'] = ['CMU']
@@ -1961,7 +2058,7 @@ def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_p
         bins=hm_bins, range=[flim, flim])
     extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
 
-    fig, axs = plt.subplots(1,2,figsize=(9,4), gridspec_kw={'width_ratios': [1, 1.2]})
+    fig, axs = plt.subplots(1,2,figsize=figsize, gridspec_kw={'width_ratios': [1, 1.2]})
     ax = axs[0].scatter(aplot, np.reshape(r, (-1,))[idx], 
                         s=10, alpha=0.3)
     axs[0].plot(flim, flim, color='g', linestyle='--', linewidth=1)
@@ -1973,7 +2070,7 @@ def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_p
     fig.colorbar(ax, ax=axs[1])
     axs[1].set_title('Frequency map')
 
-    fig.suptitle('Correlation map for layer ' + layer_name, fontsize=14)
+    fig.suptitle('Correlation of layer ' + layer_name, fontsize=14)
     for ax in axs:
         ax.set_xlabel('Activations')
         ax.set_ylabel('Spiking rates')
@@ -1987,4 +2084,4 @@ def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_p
     plt.savefig(os.path.join(save_path, layer_name+'.png'), bbox_inches='tight')
     if show_plot: plt.show()
     else: plt.close(fig)
-    print('Saved correlation map for layer {} as [{}]'.format(layer_name, os.path.join(save_path, layer_name+'.png')))
+    if verbose: print('Saved correlation map for layer {} as [{}]'.format(layer_name, os.path.join(save_path, layer_name+'.png')))
