@@ -34,6 +34,9 @@ class SpikeLayer(Layer):
 
     def __init__(self, **kwargs):
         self.config = kwargs.pop(str('config'), None)
+        # if self.config is None:
+        #     from snntoolbox.bin.utils import load_config
+        #     self.config = load_config('<log_dir_of_current_run>/.config')
         self.layer_type = self.class_name
         self.dt = self.config.getfloat('simulation', 'dt')
         self.duration = self.config.getint('simulation', 'duration')
@@ -41,6 +44,7 @@ class SpikeLayer(Layer):
         self._v_thresh = self.config.getfloat('cell', 'v_thresh')
         self.v_thresh = None
         self.time = None
+        self.out_shape = None
         self.mem = self.spiketrain = self.impulse = self.spikecounts = None
         self.refrac_until = self.max_spikerate = None
         if clamp_var:

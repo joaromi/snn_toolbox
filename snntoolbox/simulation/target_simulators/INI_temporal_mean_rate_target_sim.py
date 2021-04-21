@@ -118,11 +118,11 @@ class SNN(AbstractSNN):
                          zip(self.parsed_model.weights,
                              self.parsed_model.get_weights()) if p.name[0].isnumeric()}
         
-        parameter_map_SNN = {remove_name_counter(p.name): v for p, v in
-                         zip(self.snn.weights,
-                             self.snn.get_weights()) if p.name[0].isnumeric()}
+        # parameter_map_SNN = {remove_name_counter(p.name): v for p, v in
+        #                  zip(self.snn.weights,
+        #                      self.snn.get_weights()) if p.name[0].isnumeric()}
         count = 0
-        for p in self.snn.weights:
+        for p in tqdm(self.snn.weights):
             name = remove_name_counter(p.name)
             if name in parameter_map:
                 keras.backend.set_value(p, parameter_map[name])
@@ -131,9 +131,9 @@ class SNN(AbstractSNN):
                                             "transferred from ANN to SNN."
 
         factor = self._dt
-        for layer in self.snn.layers:
+        for layer in tqdm(self.snn.layers):
             if layer.__class__.__name__ == 'SpikeNormAdd':
-                print("Adapting shifts of "+layer.name)
+                #print("Adapting shifts of "+layer.name)
                 weights = self.parsed_model.get_layer(layer.name).get_weights()
                 weights[1:] = [ arr*factor for arr in weights[1:] ]
                 layer.set_weights(weights)
@@ -141,12 +141,12 @@ class SNN(AbstractSNN):
                 layer.set_dt(factor)
             else:
                 if hasattr(layer, 'norm'):
-                    print("Adapting shift of "+layer.name)
+                    #print("Adapting shift of "+layer.name)
                     shift = keras.backend.get_value(layer.norm[1]) * factor
                     keras.backend.set_value(layer.norm[1], shift)
                 if hasattr(layer, 'bias'):
                     # Adjust biases to time resolution of simulator.
-                    print("Adapting bias of "+layer.name)
+                    #print("Adapting bias of "+layer.name)
                     bias = keras.backend.get_value(layer.bias) * factor
                     keras.backend.set_value(layer.bias, bias)
                     if self.config.getboolean('cell', 'bias_relaxation'):
@@ -188,9 +188,6 @@ class SNN(AbstractSNN):
 
 
     def simulate_RNet_compare(self, x=None, y_parsed=None):
-        from snntoolbox.utils.utils import echo
-        from snntoolbox.simulation.utils import get_layer_synaptic_operations
-
         num_detections = self.parsed_model.output_shape[-2]
         input_b_l = x * self._dt
         num_timesteps = self._get_timestep_at_spikecount(input_b_l)
@@ -214,43 +211,8 @@ class SNN(AbstractSNN):
         return out, np.array(err), errs
 
   
-    def simulate_RNet(self, x, y_parsed=None, y_gt=None, loss_fn=None):
-        from snntoolbox.utils.utils import echo
-        from snntoolbox.simulation.utils import get_layer_synaptic_operations
-
-        num_detections = self.parsed_model.output_shape[-2]
-        input_b_l = x * self._dt
-        num_timesteps = self._get_timestep_at_spikecount(input_b_l)
-        #output_b_l_t = np.zeros((self.batch_size, 1, num_detections, 4+self.num_classes))
-        output_b_l_t = np.zeros(self.snn.layers[-1].output_shape)
-        err = [None]*num_timesteps
-        loss = [None]*num_timesteps
-
-        self._input_spikecount = 0
-        for sim_step_int in tqdm(range(num_timesteps)):
-            sim_step = (sim_step_int + 1) * self._dt
-            self.set_time(sim_step)
-
-            out_spikes = self.snn.predict_on_batch(input_b_l) #.predict_on_batch
-            output_b_l_t += (out_spikes > 0)
-            out = tf.convert_to_tensor(output_b_l_t/sim_step, dtype=tf.float32)
-            if y_parsed is not None:
-                errs = np.abs(out-y_parsed)
-                err[sim_step_int] = [
-                    [np.average(errs[:,:,:,:4]), np.amax(errs[:,:,:,:4])],
-                    [np.average(errs[:,:,:,4:]), np.amax(errs[:,:,:,4:])]
-                ]
-            if y_gt is not None:
-                loss[sim_step_int] = loss_fn(y_gt, out).numpy()
-          
-        return out, np.array(err), errs, loss
-
-
-    def analyze_RNet(self, x, y=None, layers_to_check=[], duration=None, previous_out = None, return_the_rate=True, no_display=False):
-        from snntoolbox.utils.utils import echo
-        from snntoolbox.simulation.utils import get_layer_synaptic_operations
-
-        num_detections = self.parsed_model.output_shape[-2]
+    def analyze_model(self, x, y=None, layers_to_check=[], duration=None, previous_out = None, 
+        return_the_rate=False, no_display=False, ignore_transient=False, transient_dur=None):
         x *= self._dt
 
         if duration is None:
@@ -273,42 +235,67 @@ class SNN(AbstractSNN):
             inputs = self.snn.input, 
             outputs = [layer.output for layer in self.snn.layers if layer.name in layers_to_check]
         ) 
-
-        self._input_spikecount = 0
+        if not ignore_transient: transient_dur=0.0
+        elif not transient_dur: transient_dur=float(len(model.layers))     
+        
         for sim_step_int in tqdm(range(num_timesteps), disable=no_display):
             sim_step = (sim_step_int + 1) * self._dt + t0
             self.set_time(sim_step)
             out_spikes = model.predict_on_batch(x) 
-            output_b_l_t = [acc+(spikes>0) for acc,spikes in zip(output_b_l_t,out_spikes)]
+            if sim_step>transient_dur: output_b_l_t = [acc+(spikes>0) for acc,spikes in zip(output_b_l_t,out_spikes)]
+            T = max(1, sim_step-transient_dur)
             if y is not None:
-                loss[sim_step_int] = self.snn.loss(y, output_b_l_t[-1]/sim_step).numpy()
+                loss[sim_step_int] = self.snn.loss(y, output_b_l_t[-1]/float(T)).numpy()
 
         
         if return_the_rate:
             return [(acc/sim_step).astype('float32') for acc in output_b_l_t]
         else:
-            return (output_b_l_t, sim_step, np.array(loss))
+            return (output_b_l_t, sim_step, np.array(loss), transient_dur)
 
 
 
-    def simulate_RNet_light(self, x=None, y=None):
-        from snntoolbox.utils.utils import echo
-        from snntoolbox.simulation.utils import get_layer_synaptic_operations
-
-        num_detections = self.parsed_model.output_shape[-2]
-        input_b_l = x * self._dt
+    def predict(self, x, ignore_transient=False, transient_dur=None):
+        """ x --> Input to the network. """
+        input_b_l = x * self._dt # Input scaled to the chosen dt
         num_timesteps = self._get_timestep_at_spikecount(input_b_l)
-        output_b_l_t = np.zeros((self.batch_size, num_detections, 4+self.num_classes))
+        output_b_l_t = np.zeros(self.snn.layers[-1].output_shape)
 
-        self._input_spikecount = 0
-        for sim_step_int in range(num_timesteps):
+        if not ignore_transient: transient_dur=0.0
+        elif not transient_dur: transient_dur=float(len(model.layers))
+
+        for sim_step_int in range(num_timesteps): # Computation of the spikes in each timestep
             sim_step = (sim_step_int + 1) * self._dt
             self.set_time(sim_step)
 
-            out_spikes = self.snn.predict_on_batch(input_b_l)
-            output_b_l_t += out_spikes[0] > 0
+            out_spikes = self.snn.predict(input_b_l)
+            if sim_step>transient_dur: output_b_l_t += out_spikes[0] > 0 # Accumulation of the generated spikes
 
-        return output_b_l_t / self.config.getfloat('simulation', 'duration')
+        T = max(1, sim_step-transient_dur)
+        return output_b_l_t / T  
+        """ Return the spiking rate """
+
+    def predict_in_phases(self, x, output_b_l_t=None, t0=0.0, duration=None, ignore_transient=False, transient_dur=None):
+        """ x --> Input to the network. """
+        input_b_l = x * self._dt # Input scaled to the chosen dt
+        if duration is None: num_timesteps = self._get_timestep_at_spikecount(x)
+        else:                num_timesteps = int(duration / self._dt)
+        if output_b_l_t is None: output_b_l_t = np.zeros(self.snn.layers[-1].output_shape, dtype='float32')
+
+        if not ignore_transient: transient_dur=0.0
+        elif not transient_dur: transient_dur=float(len(self.snn.layers))
+        display('[{} --> {}]'.format(t0, t0+duration))
+
+        for sim_step_int in tqdm(range(num_timesteps)): # Computation of the spikes in each timestep
+            sim_step = float(sim_step_int + 1) * self._dt + t0
+            self.set_time(sim_step)
+
+            out_spikes = self.snn.predict(input_b_l)
+            if sim_step>transient_dur: output_b_l_t += out_spikes[0] > 0 # Accumulation of the generated spikes
+
+        T = max(1.0, sim_step-transient_dur)
+        return output_b_l_t, T, sim_step
+        """ Return the spiking rate """
 
             
 

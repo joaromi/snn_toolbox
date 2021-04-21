@@ -24,6 +24,7 @@ from snntoolbox.conversion.utils import get_activations_batch
 from snntoolbox.parsing.utils import get_type, fix_input_layer_shape, \
     get_fanout, get_fanin, get_outbound_layers
 from snntoolbox.utils.utils import echo, in_top_k
+from tqdm.auto import tqdm
 
 
 class AbstractSNN:
@@ -428,7 +429,7 @@ class AbstractSNN:
 
         pass
 
-    def build_RNet(self, parsed_model, loss_fn, optimizer, num_classes = 80):
+    def build_v2(self, parsed_model, loss_fn, optimizer, num_classes = 80):
         """Assemble a spiking neural network to prepare for simulation.
 
         Parameters
@@ -537,7 +538,7 @@ class AbstractSNN:
             plot_correl_map(a,r,name,save_path=save_path)
 
     
-    def run_analysis(self, x, y=None, layers_to_check=[], save_path='.', t_to_check=None, loss_smooth=3, loss_ylim=[0,6]):
+    def run_analysis(self, x, y=None, layers_to_check=[], save_path='.', t_to_check=None, loss_ylim=[0,6], ignore_transient=True, transient_dur=None):
         #from tqdm.auto import tqdm
 
         # Get parsed model outputs
@@ -548,9 +549,9 @@ class AbstractSNN:
 
         # Interpret t_to_check attribute
         if t_to_check is None: t_to_check = self._duration
-        if hasattr(t_to_check, '__len__'):
-            if t_to_check[0]!=self._dt: t_to_check = [self._dt]+t_to_check
-        else: t_to_check = range(self._dt,t_to_check,step=float(t_to_check)/3)
+        if not hasattr(t_to_check, '__len__'):
+            t_to_check = range(self._dt,t_to_check,step=float(t_to_check)/3)
+        #elif t_to_check[0]!=self._dt: t_to_check = [self._dt]+t_to_check 
 
         # If output layer in layers_to_check, compute loss
         plot_loss = self.parsed_model.layers[-1].name == layers_to_check[-1] and y is not None
@@ -570,11 +571,12 @@ class AbstractSNN:
             duration = t-t0
             if duration < self._dt: continue
 
-            out_spike,t1,loss_it = self.analyze_RNet(x, y, layers_to_check, duration=duration,
-                        previous_out = (out_spike,t0), return_the_rate=False)
+            out_spike,t1,loss_it,tr_end = self.analyze_model(x, y, layers_to_check, duration=duration, previous_out = (out_spike,t0), 
+                return_the_rate=False, ignore_transient=ignore_transient, transient_dur=float(transient_dur))
 
             assert t1 == t, 'Error in simulation time'
-            out_rate = [(layer_spikes/t).astype('float32') for layer_spikes in out_spike]
+            T = max(1, t-tr_end)
+            out_rate = [(layer_spikes/float(T)).astype('float32') for layer_spikes in out_spike]
             if plot_loss:
                 #loss_spike[i] = self.parsed_model.loss(y, out_rate[-1]).numpy()
                 loss_spike[lm:lm+len(loss_it)]=loss_it
@@ -592,17 +594,18 @@ class AbstractSNN:
                 name = name+'  ('+timetxt+' ms)'
                 plot_correl_map(a,r,name,save_path=corr_path, verbose=0)
 
-        loss_spike = np.array(loss_spike)
-        t_loss = np.array(t_loss)
-        # Plot loss
-        plot_loss_evolution(loss_spike, time_array=t_loss, loss_parsed=loss_parsed, 
-            save_path=save_path, markers=None, verbose=0, ylim=loss_ylim)
+        if plot_loss: 
+            loss_spike = np.array(loss_spike)
+            t_loss = np.array(t_loss)
+            # Plot loss
+            plot_loss_evolution(loss_spike, time_array=t_loss, loss_parsed=loss_parsed, 
+                save_path=save_path, markers=None, verbose=0, ylim=loss_ylim, tr_end=tr_end)
 
         return out_rate[-1]
     
 
 
-    def run_RNet(self, x, y_gt=None, save_path=None):
+    def run_simulation(self, x, y_gt=None, save_path=None):
         from matplotlib import rcParams
         rcParams['font.family'] = 'serif'
         rcParams['font.sans-serif'] = ['CMU']
@@ -615,7 +618,7 @@ class AbstractSNN:
             loss_parsed = self.parsed_model.loss(y_gt, y_parsed).numpy()
 
         display('Simulating SNN: ')
-        y_spike, err, err_last, loss_snn = self.simulate_RNet(x, y_parsed, y_gt, self.parsed_model.loss)
+        y_spike, err, err_last, loss_snn = self.evaluate_model(x, y_parsed, y_gt, self.parsed_model.loss)
 
         if 'error_t' in self._plot_keys:
             print('Max box error = ', np.amax(err_last[0][0][:,:4]))
@@ -974,8 +977,8 @@ class AbstractSNN:
         """Iterates over all layers to instantiate them in the simulator"""
 
         self.add_input_layer(batch_shape)
-        for layer in self.parsed_model.layers[1:]:
-            print("Building layer: {}".format(layer.name))
+        for layer in tqdm(self.parsed_model.layers[1:]):
+            #print("Building layer: {}".format(layer.name))
             self.add_layer(layer)
             layer_type = get_type(layer)
             if layer_type == 'Dense':
@@ -1120,7 +1123,7 @@ class AbstractSNN:
                 self.num_neurons.append(np.prod(layer.output_shape[1:]))
                 if hasattr(layer, 'bias') and layer.bias is not None and \
                         any(keras.backend.get_value(layer.bias)):
-                    print("Detected layer with biases: {}".format(layer.name))
+                    #print("Detected layer with biases: {}".format(layer.name))
                     self.num_neurons_with_bias.append(self.num_neurons[-1])
                 else:
                     self.num_neurons_with_bias.append(0)
@@ -2007,22 +2010,28 @@ def remove_name_counter(name_in):
 
 
 def plot_loss_evolution(loss_array, time_array=None, loss_parsed = None, show_plot=True,
-        figsize=(8,3), ylim=None, save_path = None, markers=None, verbose=1):
+        figsize=(8,3), ylim=None, save_path = None, markers=None, verbose=1, tr_end=None, showtitle=False):
     
+    from matplotlib import rcParams
+    rcParams['font.family'] = 'serif'
+    rcParams['font.sans-serif'] = ['CMU']
     import matplotlib.pyplot as plt
 
     if time_array is None: time_array = np.arange(len(loss_array))
 
     plt.figure(figsize=figsize)
+    if tr_end:
+        plt.axvspan(0, tr_end, alpha=0.3, color='orangered')
     if loss_parsed is not None:
         plt.axhline(loss_parsed, color='g', linestyle='--')
     plt.plot(time_array, loss_array)
     if markers is not None:
         plt.scatter(time_array, loss_array, marker=markers)
-    plt.title('Loss evolution with simulation length')
+    if showtitle: plt.title('Loss evolution with simulation length')
     plt.ylabel('Loss') 
     if ylim is not None: plt.ylim(ylim)
-    plt.xlabel('Timesteps')
+    plt.xlabel('Time [ms]')
+    plt.xlim([0, time_array[-1]])
     plt.legend(["Parsed  model loss = {:6.3f}".format(loss_parsed),
                 "Spiking model loss = {:6.3f}".format(loss_array[-1])
         ])
@@ -2035,7 +2044,7 @@ def plot_loss_evolution(loss_array, time_array=None, loss_parsed = None, show_pl
         plt.savefig(os.path.join(save_path,'loss_time.png'), bbox_inches='tight')
         if verbose: print('Saved loss graph as [{}]'.format(os.path.join(save_path, 'loss_time.png')))
     if show_plot: plt.show()
-    else: plt.close(fig)
+    else: plt.close()
 
 
 def plot_correl_map(a, r, layer_name='', subset_size = 50000, hm_bins=40, save_path='.', 
